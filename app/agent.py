@@ -156,8 +156,8 @@ classifier_agent = LlmAgent(
         "You are an expert data engineering assistant. Analyze the incoming Jira ticket text and "
         "classify it into exactly one of the following categories:\n"
         "- config_only: The ticket only requests configuration changes (e.g. updating schedules, tables, metadata in JSON configs, or specifying metadata/parameters for running models without asking to create/modify SQL/Python code files).\n"
-        "- model_only: The ticket requests changes only to SQL/Python dbt models.\n"
-        "- new_full: The ticket requests a brand new pipeline with both SQL/Python models code AND configurations.\n"
+        "- model_only: The ticket requests changes to SQL/Python dbt models. Even if it contains metadata parameters like service account, projects, schedule, or config intents to accompany the model, as long as it does NOT explicitly ask to create, edit, or update separate configuration JSON/YAML files (like config.json or deploy.yml), it belongs to model_only.\n"
+        "- new_full: The ticket requests a brand new pipeline with BOTH SQL/Python models code AND explicit creation, editing, or update of separate configuration files (like config.json or deploy.yml).\n"
         "- needs_human: The ticket is ambiguous, lacks detail, or doesn't fit the other categories.\n\n"
         "Jira Ticket Text:\n{ticket_text}"
     ),
@@ -508,6 +508,18 @@ intent_extractor = LlmAgent(
     output_schema=IntentPayload,
 )
 
+model_intent_extractor = LlmAgent(
+    name="model_intent_extractor",
+    model="gemini-3.1-flash-lite",
+    instruction=(
+        "You are an expert data engineering assistant. Analyze the incoming Jira ticket text and "
+        "extract the configuration fields requested. If any field is not mentioned in the ticket, "
+        "leave it as empty or null. Do not invent any values.\n\n"
+        "Jira Ticket Text:\n{ticket_text}"
+    ),
+    output_schema=IntentPayload,
+)
+
 
 def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Event:
     """
@@ -591,17 +603,28 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Eve
             "config_intent": config_intent
         }
         
-        # Log the payload in output and model content
+        # Check category to route appropriately
+        category = ctx.state.get("ticket_category")
         import json
-        payload_str = json.dumps(payload, indent=2)
-        log_msg = f"Assembled payload for config-agent:\n```json\n{payload_str}\n```"
-        print(log_msg)
-        
-        return Event(
-            output=payload,
-            route="ok",
-            content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
-        )
+        if category == "model_only":
+            log_msg = f"Extracted metadata for model PR:\n```json\n{json.dumps(payload, indent=2)}\n```"
+            print(log_msg)
+            return Event(
+                output=node_input,
+                route="ok_model",
+                state={"agent_metadata": payload},
+                content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
+            )
+        else:
+            payload_str = json.dumps(payload, indent=2)
+            log_msg = f"Assembled payload for config-agent:\n```json\n{payload_str}\n```"
+            print(log_msg)
+            
+            return Event(
+                output=payload,
+                route="ok",
+                content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
+            )
 
 
 # model_builder LlmAgent: generates ONLY text (dbt SQL & _schema.yml).
@@ -734,6 +757,13 @@ def validate_and_push_model(ctx: Context, node_input: str) -> Generator[Event, N
             if yaml_content:
                 with open(yaml_file_path, "w") as f:
                     f.write(yaml_content)
+
+            # Write .agent-metadata.json at REPO ROOT if present
+            agent_metadata = ctx.state.get("agent_metadata")
+            if agent_metadata:
+                metadata_file_path = os.path.join(temp_dir, ".agent-metadata.json")
+                with open(metadata_file_path, "w") as f:
+                    json.dump(agent_metadata, f, indent=2)
 
             # Commit changes
             subprocess.run(["git", "add", "."], cwd=temp_dir, check=True)
@@ -954,11 +984,13 @@ root_agent = Workflow(
         }),
         (dispatch_by_category, {
             'config_only': intent_extractor,
-            'model_only': prepare_model_builder_input,
+            'model_only': model_intent_extractor,
             'new_full': handle_new_full,
         }),
         (intent_extractor, validate_config_only_payload),
+        (model_intent_extractor, validate_config_only_payload),
         (validate_config_only_payload, {
+            'ok_model': prepare_model_builder_input,
             'needs_human': handle_needs_human,
         }),
         (prepare_model_builder_input, model_builder),
