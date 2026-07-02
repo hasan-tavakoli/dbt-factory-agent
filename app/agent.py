@@ -135,12 +135,27 @@ class IntentPayload(BaseModel):
 
 # Nodes logic
 def save_ticket(ctx: Context, node_input: types.Content) -> Event:
-    """Extracts raw text from the input content and saves it to workflow state."""
+    """Extracts raw text from the input content and saves it to workflow state.
+    
+    If a pending_schedule_payload exists in session state, the user is responding
+    to a schedule prompt — short-circuit to the schedule handler instead of
+    restarting the full pipeline.
+    """
     text = ""
     if node_input and node_input.parts:
         text = "".join(part.text for part in node_input.parts if part.text)
+    
+    # Check if we are resuming from a schedule prompt
+    pending = ctx.state.get("pending_schedule_payload")
+    if pending:
+        return Event(
+            output=text,
+            route="resume_schedule",
+        )
+    
     return Event(
         output=text,
+        route="normal",
         state={
             "ticket_text": text,
             "validation_attempts": 0,
@@ -521,16 +536,23 @@ model_intent_extractor = LlmAgent(
 )
 
 
-def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Event:
+def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Generator[Event, None, None]:
     """
-    Validates completeness of the extracted payload for config_only category.
-    If required fields are missing, routes to needs_human.
-    Otherwise, logs the payload and returns it.
+    Validates completeness of the extracted payload for config_only / model_only category.
+    
+    Key logic:
+    1. Derive dag_id from domain if empty (pattern: dv_<domain>_elt).
+    2. Check if the DAG already exists in the config repo (standalone path check).
+       - EXISTS → schedule comes from existing config, don't require it from the user.
+       - NEW → if schedule is missing, ask the user (stop and prompt, don't guess).
+    3. Never invent schedule, service accounts, or projects — read from config or ask.
     """
-    from scripts.check_required_fields import check_config_and_env
+    from scripts.check_required_fields import check_config, resolve_target_path
+    
     ticket_text = ctx.state.get("ticket_text", "")
     resolved_domain = ctx.state.get("domain")
     resolved_env = ctx.state.get("environment")
+    category = ctx.state.get("ticket_category")
     
     # Get values from IntentPayload
     service_account = getattr(node_input, "service_account", "") or ""
@@ -540,104 +562,192 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Eve
     schedule = getattr(node_input, "schedule", "") or ""
     config_intent = getattr(node_input, "config_intent", "") or ""
     
-    # Run deterministic check we already have (check_config_and_env)
-    # Construct mock_data structure matching RootConfig schema checked by check_config_and_env
-    mock_data = {
-        "dag_configs": [
-            {
-                "dag_config": {
-                    "dag_id": dag_id,
-                    "schedule": schedule,
-                },
-                "job_config": {
-                    "env_variables": {
-                        "DBT_IMPERSONATE_SERVICE_ACCOUNT": service_account,
-                        "DBT_EXECUTION_PROJECT": execution_project,
-                        "DBT_PROJECT": target_project,
-                    }
-                }
-            }
-        ]
-    }
-    
-    category = ctx.state.get("ticket_category")
-    
-    if category == "model_only":
-        res = check_config_and_env(mock_data, ticket_text, resolved_domain, resolved_env)
-        # Exclude domain from missing fields initially to apply dag_id OR domain rule
-        missing = [f for f in res["missing_fields"] if f != "domain"]
+    # ── Step 1: Derive dag_id if empty ──────────────────────────────────────
+    if not dag_id.strip() and resolved_domain:
+        dag_id = f"dv_{resolved_domain}_elt"
         
+    # ── Step 2: Standalone path-exists check ────────────────────────────────
+    # This runs independently of the missing-fields check so we always know
+    # whether we're adding to an existing DAG or creating a new one.
+    dag_exists = False
+    if resolved_env and resolved_domain and dag_id.strip():
+        is_prod = resolved_env in ("prod", "production")
+        if not is_prod:
+            try:
+                _, dag_exists = resolve_target_path(
+                    resolved_env, resolved_domain, dag_id, ticket_text
+                )
+            except ValueError:
+                pass  # unsupported environment — will be caught later
+    
+    # ── Step 3: Check identity/security fields ──────────────────────────────
+    missing = []
+    if not service_account.strip():
+        missing.append("service_account")
+    if not execution_project.strip():
+        missing.append("execution_project")
+    if not target_project.strip():
+        missing.append("target_project")
+        
+    # Category-specific field requirements
+    if category == "model_only":
+        # model_only requires at least one of: dag_id OR domain
         has_domain = resolved_domain and resolved_domain.strip()
         has_dag_id = dag_id and dag_id.strip()
         if not has_domain and not has_dag_id:
             missing.append("domain or dag_id")
     else:
-        res = check_config_and_env(mock_data, ticket_text, resolved_domain, resolved_env)
-        missing = res["missing_fields"]
-        
-        # Ensure dag_id and schedule are also validated as missing if empty
+        # config_only requires dag_id explicitly
         if not dag_id.strip():
-            if "dag_id" not in missing:
-                missing.append("dag_id")
-        if not schedule.strip():
-            if "schedule" not in missing:
-                missing.append("schedule")
+            missing.append("dag_id")
             
-    # Check for prod guard
-    is_prod = res["is_prod"]
+    # ── Step 4: Schedule requirement ────────────────────────────────────────
+    # If DAG exists → schedule comes from existing config, don't require it.
+    # If DAG is new → schedule is required.
+    if not dag_exists:
+        if not schedule.strip():
+            if missing:
+                # Other critical fields also missing → needs_human with all issues
+                missing.append("schedule")
+            else:
+                # Only schedule is missing on a NEW DAG → ask the user.
+                # Store the pending payload in session state so save_ticket can
+                # detect it on re-entry and route directly to handle_schedule_response.
+                pending_payload = {
+                    "domain": resolved_domain,
+                    "environment": resolved_env,
+                    "dag_id": dag_id,
+                    "service_account": service_account,
+                    "execution_project": execution_project,
+                    "target_project": target_project,
+                    "config_intent": config_intent,
+                    "category": category
+                }
+                msg = (
+                    f"This is a new DAG ('{dag_id}') and no schedule was given "
+                    "— what cron schedule should it use? (e.g. '0 6 * * *')"
+                )
+                yield Event(
+                    content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]),
+                )
+                yield Event(
+                    output=msg,
+                    route="ask_schedule",
+                    state={"pending_schedule_payload": pending_payload}
+                )
+                return
+    
+    # ── Step 5: Prod guard ──────────────────────────────────────────────────
+    is_prod = resolved_env in ("prod", "production")
     
     if missing:
         msg = f"Critical fields/metadata are missing: {', '.join(missing)}"
-        return Event(
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(
             output=msg,
             route="needs_human",
-            state={"missing_critical_fields": missing},
-            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+            state={"missing_critical_fields": missing}
         )
-    elif is_prod:
+        return
+        
+    if is_prod:
         msg = "this repo holds non-production config only, so production must be handled by a human."
-        return Event(
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(
             output=msg,
             route="needs_human",
-            state={"missing_critical_fields": ["environment (production guard)"]},
-            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+            state={"missing_critical_fields": ["environment (production guard)"]}
+        )
+        return
+        
+    # ── Step 6: Assemble payload ────────────────────────────────────────────
+    payload = {
+        "source": "model" if category == "model_only" else "config_only",
+        "domain": resolved_domain,
+        "environment": resolved_env,
+        "dag_id": dag_id,
+        "schedule": schedule,
+        "service_account": service_account,
+        "execution_project": execution_project,
+        "target_project": target_project,
+        "config_intent": config_intent
+    }
+    
+    import json
+    if category == "model_only":
+        log_msg = f"Extracted metadata for model PR:\n```json\n{json.dumps(payload, indent=2)}\n```"
+        print(log_msg)
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)]))
+        yield Event(
+            output=node_input,
+            route="ok_model",
+            state={"agent_metadata": payload}
         )
     else:
-        # Check category to route appropriately
-        category = ctx.state.get("ticket_category")
+        payload_str = json.dumps(payload, indent=2)
+        log_msg = f"Assembled payload for config-agent:\n```json\n{payload_str}\n```"
+        print(log_msg)
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)]))
+        yield Event(output=payload, route="ok")
 
-        # Assemble payload
-        payload = {
-            "source": "model" if category == "model_only" else "config_only",
-            "domain": resolved_domain,
-            "environment": resolved_env,
-            "dag_id": dag_id,
-            "schedule": schedule,
-            "service_account": service_account,
-            "execution_project": execution_project,
-            "target_project": target_project,
-            "config_intent": config_intent
-        }
-        import json
-        if category == "model_only":
-            log_msg = f"Extracted metadata for model PR:\n```json\n{json.dumps(payload, indent=2)}\n```"
-            print(log_msg)
-            return Event(
-                output=node_input,
-                route="ok_model",
-                state={"agent_metadata": payload},
-                content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
-            )
-        else:
-            payload_str = json.dumps(payload, indent=2)
-            log_msg = f"Assembled payload for config-agent:\n```json\n{payload_str}\n```"
-            print(log_msg)
-            
-            return Event(
-                output=payload,
-                route="ok",
-                content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
-            )
+
+def stop_for_user_input(node_input: Any) -> Event:
+    """Terminal node — halts the workflow so the user can respond.
+    
+    The workflow stops here. When the user sends their next message,
+    save_ticket detects pending_schedule_payload in session state and
+    routes directly to handle_schedule_response.
+    """
+    return Event(output=node_input)
+
+
+def handle_schedule_response(ctx: Context, node_input: Any) -> Event:
+    """Processes the user's schedule response and resumes the workflow.
+    
+    Called when save_ticket detects pending_schedule_payload in session state.
+    The user's response (a cron expression) arrives as the node_input string.
+    After assembling the payload, clear pending_schedule_payload so future
+    messages go through the normal pipeline.
+    """
+    response_schedule = str(node_input).strip()
+    
+    pending = ctx.state.get("pending_schedule_payload", {})
+    category = pending.get("category")
+    
+    # Assemble payload with the user-provided schedule
+    payload = {
+        "source": "model" if category == "model_only" else "config_only",
+        "domain": pending.get("domain"),
+        "environment": pending.get("environment"),
+        "dag_id": pending.get("dag_id"),
+        "schedule": response_schedule,
+        "service_account": pending.get("service_account"),
+        "execution_project": pending.get("execution_project"),
+        "target_project": pending.get("target_project"),
+        "config_intent": pending.get("config_intent")
+    }
+    
+    import json
+    if category == "model_only":
+        log_msg = f"Extracted metadata for model PR:\n```json\n{json.dumps(payload, indent=2)}\n```"
+        print(log_msg)
+        return Event(
+            output=node_input,
+            route="ok_model",
+            # Clear pending_schedule_payload so future messages go through normal pipeline
+            state={"agent_metadata": payload, "pending_schedule_payload": None},
+            content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
+        )
+    else:
+        payload_str = json.dumps(payload, indent=2)
+        log_msg = f"Assembled payload for config-agent:\n```json\n{payload_str}\n```"
+        print(log_msg)
+        return Event(
+            output=payload,
+            route="ok",
+            state={"pending_schedule_payload": None},
+            content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
+        )
 
 
 # model_builder LlmAgent: generates ONLY text (dbt SQL & _schema.yml).
@@ -968,7 +1078,10 @@ root_agent = Workflow(
     name="dbt_factory_agent",
     edges=[
         ('START', save_ticket),
-        (save_ticket, classifier_agent),
+        (save_ticket, {
+            'normal': classifier_agent,
+            'resume_schedule': handle_schedule_response,
+        }),
         (classifier_agent, route_ticket),
         (route_ticket, {
             'ok': check_domain_exact,
@@ -1004,7 +1117,12 @@ root_agent = Workflow(
         (model_intent_extractor, validate_config_only_payload),
         (validate_config_only_payload, {
             'ok_model': prepare_model_builder_input,
+            'ask_schedule': stop_for_user_input,
             'needs_human': handle_needs_human,
+        }),
+        # handle_schedule_response is reached via save_ticket -> resume_schedule
+        (handle_schedule_response, {
+            'ok_model': prepare_model_builder_input,
         }),
         (prepare_model_builder_input, model_builder),
         (model_builder, validate_and_push_model),
