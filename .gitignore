@@ -214,3 +214,4 @@ scripts/test_model_only.py
 scripts/test_pr_creation.py
 scripts/test_config_only.py
 scripts/test_model_metadata.py
+scripts/test_sport_91.py

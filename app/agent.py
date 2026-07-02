@@ -560,16 +560,28 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Eve
         ]
     }
     
-    res = check_config_and_env(mock_data, ticket_text, resolved_domain, resolved_env)
-    missing = res["missing_fields"]
+    category = ctx.state.get("ticket_category")
     
-    # Ensure dag_id and schedule are also validated as missing if empty
-    if not dag_id.strip():
-        if "dag_id" not in missing:
-            missing.append("dag_id")
-    if not schedule.strip():
-        if "schedule" not in missing:
-            missing.append("schedule")
+    if category == "model_only":
+        res = check_config_and_env(mock_data, ticket_text, resolved_domain, resolved_env)
+        # Exclude domain from missing fields initially to apply dag_id OR domain rule
+        missing = [f for f in res["missing_fields"] if f != "domain"]
+        
+        has_domain = resolved_domain and resolved_domain.strip()
+        has_dag_id = dag_id and dag_id.strip()
+        if not has_domain and not has_dag_id:
+            missing.append("domain or dag_id")
+    else:
+        res = check_config_and_env(mock_data, ticket_text, resolved_domain, resolved_env)
+        missing = res["missing_fields"]
+        
+        # Ensure dag_id and schedule are also validated as missing if empty
+        if not dag_id.strip():
+            if "dag_id" not in missing:
+                missing.append("dag_id")
+        if not schedule.strip():
+            if "schedule" not in missing:
+                missing.append("schedule")
             
     # Check for prod guard
     is_prod = res["is_prod"]
