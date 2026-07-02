@@ -91,6 +91,21 @@ class Classification(BaseModel):
     reason: str = Field(description="The reasoning behind this classification.")
 
 
+class VibeDiffSummary(BaseModel):
+    plain_summary: str = Field(
+        description="2-3 plain-English sentences explaining what this change does in the project."
+    )
+    risk_level: Literal["low", "medium", "high"] = Field(
+        description="One of low, medium, or high."
+    )
+    risk_reason: str = Field(
+        description="A one-line reason explaining the chosen risk level."
+    )
+    intent_alignment: str = Field(
+        description="A short sentence explaining how well the generated model matches the ticket's intent."
+    )
+
+
 # Nodes logic
 def save_ticket(ctx: Context, node_input: types.Content) -> Event:
     """Extracts raw text from the input content and saves it to workflow state."""
@@ -599,12 +614,148 @@ def validate_and_push_model(ctx: Context, node_input: str) -> Generator[Event, N
         # Outside the temp directory, it has been successfully cleaned up
         msg = f"Successfully generated, safety checked, and pushed dbt model `{model_name}` to feature branch `{feature_branch}`."
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
-        yield Event(output=msg, route="ok")
+        yield Event(
+            output=msg,
+            route="ok",
+            state={
+                "generated_sql": sql_content,
+                "generated_yaml": yaml_content,
+                "model_name": model_name,
+                "feature_branch": feature_branch
+            }
+        )
 
     except Exception as e:
         msg = f"Model deployment failed during git push: {str(e)}"
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
         yield Event(output=msg, route="needs_human", state={"missing_critical_fields": ["Git Push Exception"]})
+
+
+def prepare_pr_summarizer_input(ctx: Context, node_input: Any) -> Event:
+    """Prepares prompt for the PR Vibe Diff summarizer."""
+    ticket_text = ctx.state.get("ticket_text", "")
+    sql = ctx.state.get("generated_sql", "")
+    yaml = ctx.state.get("generated_yaml", "")
+    
+    prompt = (
+        f"Original Ticket:\n{ticket_text}\n\n"
+        f"Generated dbt SQL Model:\n```sql\n{sql}\n```\n\n"
+        f"Generated schema.yml:\n```yaml\n{yaml}\n```\n\n"
+        f"Please analyze these inputs and generate the structured PR review summary."
+    )
+    return Event(output=prompt)
+
+
+# pr_summarizer LlmAgent: generates the structured vibe diff summary
+pr_summarizer = LlmAgent(
+    name="pr_summarizer",
+    model="gemini-3.1-flash-lite",
+    output_schema=VibeDiffSummary,
+    instruction=(
+        "You are an expert code reviewer. Your job is to analyze the generated dbt model and schema "
+        "relative to the original ticket intent, and produce a structured Vibe Diff summary."
+    )
+)
+
+
+def create_pull_request(ctx: Context, node_input: VibeDiffSummary) -> Generator[Event, None, None]:
+    """
+    Deterministic step: parses the VibeDiffSummary from the LLM, builds the markdown PR body,
+    and calls the GitHub API to create a Pull Request.
+    """
+    import json
+    import urllib.request
+    import urllib.error
+    
+    plain_summary = getattr(node_input, "plain_summary", "")
+    risk_level = getattr(node_input, "risk_level", "low")
+    risk_reason = getattr(node_input, "risk_reason", "")
+    intent_alignment = getattr(node_input, "intent_alignment", "")
+    
+    model_name = ctx.state.get("model_name", "new_model")
+    feature_branch = ctx.state.get("feature_branch", "")
+    sql = ctx.state.get("generated_sql", "")
+    yaml = ctx.state.get("generated_yaml", "")
+    
+    # Build PR Body in Markdown format
+    pr_body = (
+        f"## Summary\n"
+        f"{plain_summary}\n\n"
+        f"## Risk\n"
+        f"- **Level**: {risk_level.upper()}\n"
+        f"- **Reason**: {risk_reason}\n\n"
+        f"## Intent alignment\n"
+        f"{intent_alignment}\n\n"
+        f"## Security check\n"
+        f"- **Status**: SELECT-only confirmed\n"
+        f"- **Detail**: The SQL code contains only SELECT statements and has been deterministically verified to contain no DDL/DML write statements.\n\n"
+        f"## Files changed\n"
+        f"### `dbt/models/public/{model_name}.sql`\n"
+        f"```sql\n{sql}\n```\n\n"
+        f"### `dbt/models/public/_schema.yml`\n"
+        f"```yaml\n{yaml}\n```"
+    )
+    
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not github_token:
+        msg = (
+            f"GITHUB_TOKEN not found in env. Simulating Pull Request creation.\n\n"
+            f"=== PR Title ===\n"
+            f"✨ feat: add dbt model {model_name}\n\n"
+            f"=== PR Base/Head ===\n"
+            f"Base: staging\n"
+            f"Head: {feature_branch}\n\n"
+            f"=== PR Body ===\n"
+            f"{pr_body}"
+        )
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg)
+        return
+
+    # Call GitHub API to create PR
+    url = "https://api.github.com/repos/hasan-tavakoli/dv-sports-etl/pulls"
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "dbt-factory-agent",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "title": f"✨ feat: add dbt model {model_name}",
+        "head": feature_branch,
+        "base": "staging",
+        "body": pr_body
+    }
+    
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            pr_url = res_data.get("html_url", "")
+            
+            msg = (
+                f"Successfully created Pull Request:\n"
+                f"PR URL: {pr_url}\n\n"
+                f"### Vibe Diff Pull Request Body\n"
+                f"---\n"
+                f"{pr_body}"
+            )
+            yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+            yield Event(output={"pr_url": pr_url, "pr_body": pr_body})
+            
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode("utf-8")
+        msg = f"Failed to create GitHub Pull Request. HTTP Error: {e.code}. Details: {err_msg}"
+        if github_token:
+            msg = msg.replace(github_token, "***")
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg)
 
 
 
@@ -674,8 +825,11 @@ root_agent = Workflow(
         (prepare_model_builder_input, model_builder),
         (model_builder, validate_and_push_model),
         (validate_and_push_model, {
+            'ok': prepare_pr_summarizer_input,
             'needs_human': handle_needs_human,
         }),
+        (prepare_pr_summarizer_input, pr_summarizer),
+        (pr_summarizer, create_pull_request),
         (config_generator, check_critical_fields),
         (check_critical_fields, {
             'ok': validate_config,
