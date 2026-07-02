@@ -35,25 +35,37 @@ def parse_env_and_domain(ticket_text: str) -> tuple[str | None, str | None]:
     return env, domain
 
 
+ENVIRONMENT_SUBTREE_MAP = {
+    "dev": "dv-dev-eu",
+    "stage": "dv-stage-eu",
+    "stage-sa": "dv-stage-sa",
+}
+
+
 def resolve_target_path(env: str, domain: str, dag_id: str, ticket_text: str) -> tuple[str, bool]:
     """
-    Resolves target path: <subtree>/<domain>/<dag-name>/config.json
+    Resolves target path: dv-platform-config/<subtree>/<domain>/<dag-name>/config.json
     where dag-name uses hyphens instead of underscores.
     """
-    if env == "dev":
-        subtree = "leo-dev-eu"
-    elif env == "stage":
-        if re.search(r'(?i)\bsouth-america\b|\bsa\b', ticket_text):
-            subtree = "leo-stage-sa"
-        else:
-            subtree = "leo-stage-eu"
-    else:
-        raise ValueError(f"Unsupported environment: {env}")
+    env_key = env
+    if env == "stage" and re.search(r'(?i)\bsouth-america\b|\bsa\b', ticket_text):
+        env_key = "stage-sa"
+        
+    subtree = ENVIRONMENT_SUBTREE_MAP.get(env_key)
+    if not subtree:
+        raise ValueError(f"Unsupported environment: {env} (resolved key: {env_key})")
         
     dag_name_hyphenated = dag_id.replace("_", "-")
-    target_path = Path(subtree) / domain / dag_name_hyphenated / "config.json"
+    target_path = Path("dv-platform-config") / subtree / domain / dag_name_hyphenated / "config.json"
     
-    return str(target_path), target_path.exists()
+    exists = target_path.exists()
+    if not exists:
+        # Check if it exists in the sibling config repo
+        sibling_path = Path("..") / target_path
+        if sibling_path.exists():
+            exists = True
+            
+    return str(target_path), exists
 
 
 def check_config(data: dict) -> list[str]:

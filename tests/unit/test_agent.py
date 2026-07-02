@@ -139,7 +139,7 @@ def test_validate_config_success(tmp_path):
         
         mock_res = MagicMock()
         mock_res.returncode = 0
-        mock_res.stdout = "OK    my_dag in leo-dev-eu"
+        mock_res.stdout = "OK    my_dag in dv-dev-eu"
         mock_res.stderr = ""
         
         with patch("subprocess.run", return_value=mock_res) as mock_run:
@@ -243,7 +243,7 @@ def test_check_critical_fields_success():
     
     event = check_critical_fields(ctx, node_input)
     assert event.actions.route == "ok"
-    assert "Resolved target path: leo-stage-eu/sports/my-dag/config.json" in event.content.parts[0].text
+    assert "Resolved target path: dv-platform-config/dv-stage-eu/sports/my-dag/config.json" in event.content.parts[0].text
     assert event.output == node_input
 
 

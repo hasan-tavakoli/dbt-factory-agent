@@ -40,7 +40,7 @@ from pydantic import ValidationError
 
 
 def describe_path(path: Path) -> str:
-    """Turn a config path into a short label like 'my-dag in leo-dev-eu'."""
+    """Turn a config path into a short label like 'my-dag in dv-dev-eu'."""
     parts = path.parts
     if len(parts) >= 3:
         return f"{parts[-2]} in {parts[-3]}"
