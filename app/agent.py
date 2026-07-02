@@ -591,8 +591,12 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Eve
             content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
         )
     else:
+        # Check category to route appropriately
+        category = ctx.state.get("ticket_category")
+
         # Assemble payload
         payload = {
+            "source": "model" if category == "model_only" else "config_only",
             "domain": resolved_domain,
             "environment": resolved_env,
             "dag_id": dag_id,
@@ -602,9 +606,6 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Eve
             "target_project": target_project,
             "config_intent": config_intent
         }
-        
-        # Check category to route appropriately
-        category = ctx.state.get("ticket_category")
         import json
         if category == "model_only":
             log_msg = f"Extracted metadata for model PR:\n```json\n{json.dumps(payload, indent=2)}\n```"
