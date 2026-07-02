@@ -23,7 +23,8 @@ from app.agent import (
     save_ticket,
     route_ticket,
     handle_config_only,
-    handle_model_only,
+    prepare_model_builder_input,
+    validate_and_push_model,
 )
 
 def test_save_ticket():
@@ -84,11 +85,36 @@ def test_handle_config_only(tmp_path):
         os.chdir(old_cwd)
 
 
-def test_handle_model_only():
-    events = list(handle_model_only({}))
-    assert len(events) == 2
-    assert events[0].content.parts[0].text == "not implemented yet"
-    assert events[1].output == "not implemented yet"
+def test_prepare_model_builder_input():
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"ticket_text": "create daily active users model", "domain": "sports"}
+    event = prepare_model_builder_input(ctx, {})
+    assert "sports" in event.output
+    assert "create daily active users model" in event.output
+
+def test_check_sql_safety():
+    from scripts.check_sql_safety import check_sql_safety
+    
+    # Safe queries
+    is_safe, reason = check_sql_safety("SELECT * FROM raw.games")
+    assert is_safe
+    assert reason is None
+    
+    is_safe, reason = check_sql_safety("with daily_stats as (select * from games) select * from daily_stats")
+    assert is_safe
+    
+    # Dangerous queries
+    is_safe, reason = check_sql_safety("DROP TABLE raw.games")
+    assert not is_safe
+    assert "DROP" in reason
+    
+    is_safe, reason = check_sql_safety("DELETE FROM raw.games WHERE id = 1")
+    assert not is_safe
+    assert "DELETE" in reason
+    
+    is_safe, reason = check_sql_safety("CREATE OR REPLACE TABLE raw.games AS SELECT * FROM raw.old_games")
+    assert not is_safe
+    assert "CREATE/REPLACE" in reason
 
 
 def test_validate_config_success(tmp_path):

@@ -210,3 +210,4 @@ config.json
 
 # Interactive test helper
 scripts/test_interactive.py
+scripts/test_model_only.py

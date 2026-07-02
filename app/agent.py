@@ -454,11 +454,158 @@ def handle_config_only(node_input: dict) -> Generator[Event, None, None]:
     yield Event(output=node_input)
 
 
-def handle_model_only(node_input: dict) -> Generator[Event, None, None]:
-    """Yields 'not implemented yet' message for model_only route."""
-    msg = "not implemented yet"
-    yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
-    yield Event(output=msg)
+# model_builder LlmAgent: generates ONLY text (dbt SQL & _schema.yml).
+# It must never execute code, touch files, or run git directly.
+model_builder = LlmAgent(
+    name="model_builder",
+    model="gemini-3.1-flash-lite",
+    instruction=(
+        "You are a dbt model code builder. Your job is to generate ONLY two files in your output text block:\n"
+        "1. The dbt SQL model code (SELECT queries only).\n"
+        "2. The schema metadata file (_schema.yml).\n\n"
+        "Rules:\n"
+        "- Output the two files strictly using standard markdown code blocks with the format:\n"
+        "```sql\n"
+        "-- filepath: dbt/models/public/<model_name>.sql\n"
+        "select ...\n"
+        "```\n"
+        "and\n"
+        "```yaml\n"
+        "# filepath: dbt/models/public/_schema.yml\n"
+        "version: 2\n"
+        "...\n"
+        "```\n"
+        "- You must only generate SELECT queries. Never generate any write operations like DROP, DELETE, TRUNCATE, ALTER, GRANT, INSERT, UPDATE, or CREATE OR REPLACE.\n"
+        "- Do not execute any code, shell commands, or make network calls."
+    )
+)
+
+def prepare_model_builder_input(ctx: Context, node_input: Any) -> Event:
+    """Formats the ticket description and domain for model_builder."""
+    ticket_text = ctx.state.get("ticket_text", "")
+    domain = ctx.state.get("domain", "")
+    prompt = (
+        f"Domain: {domain}\n"
+        f"Ticket Description: {ticket_text}\n\n"
+        f"Please generate the dbt model SQL and the _schema.yml file contents according to the rules."
+    )
+    return Event(output=prompt)
+
+def validate_and_push_model(ctx: Context, node_input: str) -> Generator[Event, None, None]:
+    """
+    Parses LLM output, performs a deterministic SQL safety check,
+    and pushes the files to a feature branch in a secure temp directory.
+    """
+    import re
+    import subprocess
+    import tempfile
+    import os
+    import time
+    from scripts.check_sql_safety import check_sql_safety
+    from dotenv import load_dotenv
+
+    text = node_input or ""
+
+    # Parse SQL and YAML blocks from markdown
+    sql_match = re.search(r'```sql\s*([\s\S]*?)```', text)
+    yaml_match = re.search(r'```yaml\s*([\s\S]*?)```', text)
+
+    sql_content = sql_match.group(1).strip() if sql_match else ""
+    yaml_content = yaml_match.group(1).strip() if yaml_match else ""
+
+    if not sql_content:
+        # Invalid generation or missing SQL block
+        msg = "Model generation failed: No SQL block found in LLM response."
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="needs_human", state={"missing_critical_fields": ["SQL block generation"]})
+        return
+
+    # Extract model name
+    model_name = "new_model"
+    name_match = re.search(r'filepath:\s*(?:dbt/)?models/public/([a-zA-Z0-9_]+)\.sql', text)
+    if name_match:
+        model_name = name_match.group(1)
+    else:
+        name_match_in_sql = re.search(r'filepath:\s*(?:dbt/)?models/public/([a-zA-Z0-9_]+)\.sql', sql_content)
+        if name_match_in_sql:
+            model_name = name_match_in_sql.group(1)
+
+    # Guard Layer 2: Deterministic SQL Safety Check
+    # This check ensures the generated code only contains SELECT queries.
+    # A SELECT-only query cannot modify tables, delete data, or change permissions.
+    is_safe, safety_reason = check_sql_safety(sql_content)
+    if not is_safe:
+        msg = f"SQL safety check rejected the model code:\nReason: {safety_reason}"
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="needs_human", state={"missing_critical_fields": ["SQL safety check"]})
+        return
+
+    # Guard Layer 3: Git Workspace Isolation (tempfile.TemporaryDirectory)
+    # The git operations run inside a clean temp directory with a localized clone.
+    # If anything fails or raises an exception, the directory is automatically removed
+    # from the local disk, cleaning up any generated state/dirty files.
+    load_dotenv()
+    github_token = os.getenv("GITHUB_TOKEN")
+
+    # Secure remote URL: if token is present in env, use token for authentication.
+    # Otherwise, fall back to SSH for local testing.
+    # Never log or print the token or remote credentials to avoid exposing secrets.
+    if github_token:
+        repo_url = f"https://x-access-token:{github_token}@github.com/hasan-tavakoli/dv-sports-etl.git"
+    else:
+        repo_url = "git@github.com:hasan-tavakoli/dv-sports-etl.git"
+
+    # Guard Layer 3.1: Feature branch only
+    # Pushing to feature branch ensures it must go through a pull request and review,
+    # and cannot directly alter the master/staging branches.
+    feature_branch = f"feature/add-model-{model_name}-{int(time.time())}"
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Clone repo
+            clone_cmd = ["git", "clone", repo_url, "."]
+            res = subprocess.run(clone_cmd, cwd=temp_dir, capture_output=True, text=True)
+            if res.returncode != 0:
+                err = res.stderr.replace(github_token, "***") if github_token else res.stderr
+                raise RuntimeError(f"Git clone failed: {err}")
+
+            # Create feature branch
+            subprocess.run(["git", "checkout", "-b", feature_branch], cwd=temp_dir, check=True)
+
+            # Write files
+            # SQL model file
+            sql_file_path = os.path.join(temp_dir, "dbt", "models", "public", f"{model_name}.sql")
+            os.makedirs(os.path.dirname(sql_file_path), exist_ok=True)
+            with open(sql_file_path, "w") as f:
+                f.write(sql_content)
+
+            # YAML schema file
+            yaml_file_path = os.path.join(temp_dir, "dbt", "models", "public", "_schema.yml")
+            if yaml_content:
+                with open(yaml_file_path, "w") as f:
+                    f.write(yaml_content)
+
+            # Commit changes
+            subprocess.run(["git", "add", "."], cwd=temp_dir, check=True)
+            subprocess.run(["git", "commit", "-m", f"✨ feat: generate dbt model {model_name}"], cwd=temp_dir, check=True)
+
+            # Push changes to feature branch
+            push_cmd = ["git", "push", "origin", feature_branch]
+            push_res = subprocess.run(push_cmd, cwd=temp_dir, capture_output=True, text=True)
+            if push_res.returncode != 0:
+                err = push_res.stderr.replace(github_token, "***") if github_token else push_res.stderr
+                raise RuntimeError(f"Git push failed: {err}")
+
+        # Outside the temp directory, it has been successfully cleaned up
+        msg = f"Successfully generated, safety checked, and pushed dbt model `{model_name}` to feature branch `{feature_branch}`."
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="ok")
+
+    except Exception as e:
+        msg = f"Model deployment failed during git push: {str(e)}"
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="needs_human", state={"missing_critical_fields": ["Git Push Exception"]})
+
 
 
 def handle_new_full(node_input: dict) -> Generator[Event, None, None]:
@@ -521,8 +668,13 @@ root_agent = Workflow(
         }),
         (dispatch_by_category, {
             'config_only': config_generator,
-            'model_only': handle_model_only,
+            'model_only': prepare_model_builder_input,
             'new_full': handle_new_full,
+        }),
+        (prepare_model_builder_input, model_builder),
+        (model_builder, validate_and_push_model),
+        (validate_and_push_model, {
+            'needs_human': handle_needs_human,
         }),
         (config_generator, check_critical_fields),
         (check_critical_fields, {
