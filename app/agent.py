@@ -512,12 +512,115 @@ def handle_config_only(node_input: dict) -> Generator[Event, None, None]:
     yield Event(output=node_input)
 
 
-config_agent_remote = RemoteA2aAgent(
-    name="dv_config_agent",
-    description="Remote config-agent that builds/updates dbt config and opens a PR.",
-    agent_card="http://localhost:8001/.well-known/agent-card.json",
-    timeout=300.0,
-)
+def call_remote_config_agent(ctx: Context, node_input: Any) -> Generator[Event, None, None]:
+    """
+    Calls the remote config-agent A2A server at http://localhost:8001 directly
+    via JSON-RPC to avoid RemoteA2aAgent forwarding the user's session history (the ticket text)
+    instead of the assembled config payload.
+    """
+    import urllib.request
+    import urllib.error
+    import json
+    import uuid
+    from google.adk.events.event import Event
+    from google.genai import types
+    
+    url = "http://localhost:8001"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    
+    # payload_str is passed in as node_input
+    payload_str = str(node_input)
+    
+    # Construct standard JSON-RPC 2.0 message/send request
+    message_id = str(uuid.uuid4())
+    req_body = {
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "params": {
+            "message": {
+                "message_id": message_id,
+                "role": "user",
+                "parts": [
+                    {
+                        "text": payload_str
+                    }
+                ]
+            }
+        },
+        "id": 1
+    }
+    
+    msg = f"Sending assembled JSON payload to remote config-agent at {url}..."
+    yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+    
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(req_body).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+    
+    try:
+        # A2A task timeout is 300s
+        with urllib.request.urlopen(req, timeout=300) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            
+            if "error" in res_data:
+                err = res_data["error"]
+                err_msg = f"Remote config-agent returned error: {err.get('message', err)}"
+                yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
+                yield Event(output={"error": err_msg})
+                return
+                
+            result = res_data.get("result", {})
+            
+            # Extract output text from history or directly from Message/Task
+            text_output = ""
+            if isinstance(result, dict) and "history" in result:
+                history = result.get("history", [])
+                agent_texts = []
+                for msg in history:
+                    if isinstance(msg, dict) and msg.get("role") in ("agent", "model"):
+                        parts = msg.get("parts", [])
+                        txt = "".join(part.get("text", "") for part in parts if isinstance(part, dict) and "text" in part)
+                        if txt.strip():
+                            agent_texts.append(txt.strip())
+                if agent_texts:
+                    # Join all agent messages with clear separation
+                    text_output = "\n\n".join(agent_texts)
+            
+            if not text_output and isinstance(result, dict):
+                if result.get("kind") == "message":
+                    parts = result.get("parts", [])
+                    text_output = "".join(part.get("text", "") for part in parts if isinstance(part, dict) and "text" in part)
+                elif result.get("kind") == "task":
+                    status = result.get("status", {})
+                    output_msg = status.get("output", {})
+                    parts = output_msg.get("parts", [])
+                    text_output = "".join(part.get("text", "") for part in parts if isinstance(part, dict) and "text" in part)
+            
+            if not text_output:
+                # Fallback serializing the result
+                text_output = json.dumps(result, indent=2)
+                
+            if not text_output.strip():
+                text_output = "Remote config-agent completed execution but returned no output text."
+                
+            yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=text_output)]))
+            yield Event(output=text_output)
+            
+    except urllib.error.URLError as e:
+        err_msg = f"Failed to connect to remote config-agent at {url}. Make sure uvicorn is running on port 8001. Error details: {e.reason}"
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
+        yield Event(output={"error": err_msg})
+        
+    except Exception as e:
+        err_msg = f"An unexpected error occurred while calling remote config-agent: {e}"
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
+        yield Event(output={"error": err_msg})
 
 
 intent_extractor = LlmAgent(
@@ -1126,14 +1229,14 @@ root_agent = Workflow(
         (model_intent_extractor, validate_config_only_payload),
         (validate_config_only_payload, {
             'ok_model': prepare_model_builder_input,
-            'ok': config_agent_remote,
+            'ok': call_remote_config_agent,
             'ask_schedule': stop_for_user_input,
             'needs_human': handle_needs_human,
         }),
         # handle_schedule_response is reached via save_ticket -> resume_schedule
         (handle_schedule_response, {
             'ok_model': prepare_model_builder_input,
-            'ok': config_agent_remote,
+            'ok': call_remote_config_agent,
         }),
         (prepare_model_builder_input, model_builder),
         (model_builder, validate_and_push_model),
