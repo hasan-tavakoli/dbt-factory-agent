@@ -14,7 +14,9 @@
 
 import json
 import os
-from typing import Generator
+import sys
+from pathlib import Path
+from typing import Generator, Any
 from pydantic import BaseModel, Field
 from typing import Literal
 
@@ -23,14 +25,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from google.adk.agents import LlmAgent
-from google.adk.apps import App
+from google.adk.apps import App, ResumabilityConfig
 from google.adk.workflow import Workflow
 from google.adk.events.event import Event
 from google.adk.agents.context import Context
 from google.genai import types
+from google.adk.events.request_input import RequestInput
 
-import sys
-from pathlib import Path
+# Load known domains configuration
+known_domains_file = Path(__file__).resolve().parent.parent / "scripts" / "known_domains.json"
+try:
+    with open(known_domains_file, "r") as f:
+        KNOWN_DOMAINS = json.load(f)
+except Exception:
+    KNOWN_DOMAINS = ["sports", "wallet", "analytics", "bi"]
+
+# Load known environments configuration
+known_envs_file = Path(__file__).resolve().parent.parent / "scripts" / "known_environments.json"
+try:
+    with open(known_envs_file, "r") as f:
+        KNOWN_ENVS = json.load(f)
+except Exception:
+    KNOWN_ENVS = ["dev", "stage"]
 
 # Add project root to sys.path to allow importing from scripts folder
 project_root = Path(__file__).resolve().parent.parent
@@ -107,10 +123,15 @@ classifier_agent = LlmAgent(
 )
 
 
-def route_ticket(node_input: dict) -> Event:
+def route_ticket(ctx: Context, node_input: dict) -> Event:
     """Routes execution based on the classification category."""
     category = node_input.get("category")
-    return Event(output=node_input, route=category)
+    route = "needs_human" if category == "needs_human" else "ok"
+    return Event(
+        output=node_input,
+        route=route,
+        state={"ticket_category": category}
+    )
 
 
 config_generator = LlmAgent(
@@ -119,11 +140,252 @@ config_generator = LlmAgent(
     instruction=(
         "You are a dbt DAG config generator. Based on the Jira ticket description, "
         "generate the required dbt DAG configuration conforming to the requested schema.\n\n"
+        "CRITICAL INSTRUCTION: Never invent security/identity values (such as service accounts "
+        "like DBT_IMPERSONATE_SERVICE_ACCOUNT or project IDs like DBT_EXECUTION_PROJECT and DBT_PROJECT). "
+        "Never invent environment or domain names. "
+        "If the ticket does not explicitly provide these values, leave them as empty strings. "
+        "Do not guess or hallucinate these fields.\n\n"
         "Jira Ticket Text:\n{ticket_text}\n"
         "{validation_feedback}"
     ),
     output_schema=RootConfig,
 )
+
+
+class DomainSimilarity(BaseModel):
+    suggested_domain: str = Field(description="The closest matched known domain from the list of allowed domains, or empty string if it's completely unrelated.")
+    reason: str = Field(description="Reasoning for suggestion.")
+
+
+def check_domain_exact(ctx: Context, node_input: Any) -> Event:
+    """Extracts the domain from the ticket text and checks if it's exactly in KNOWN_DOMAINS."""
+    from scripts.check_required_fields import parse_env_and_domain
+    ticket_text = ctx.state.get("ticket_text", "")
+    
+    env, domain = parse_env_and_domain(ticket_text)
+    
+    if not domain:
+        return Event(output={"domain": ""}, route="typo_check", state={"domain": ""})
+        
+    if domain in KNOWN_DOMAINS:
+        return Event(
+            output=node_input,
+            route="ok",
+            state={"domain": domain}
+        )
+    else:
+        return Event(
+            output={"domain": domain},
+            route="typo_check",
+            state={"domain": domain}
+        )
+
+
+domain_similarity_agent = LlmAgent(
+    name="domain_similarity_agent",
+    model="gemini-3.1-flash-lite",
+    instruction=(
+        f"You are an expert domain validator. You are given a domain name that was parsed from a ticket.\n"
+        f"Your task is to compare it against our list of known allowed domains: {', '.join(KNOWN_DOMAINS)}.\n"
+        f"If the input domain is a likely typo of one of the known domains (e.g., 'sprot' for 'sports', "
+        f"'walet' for 'wallet', 'bi' for 'bi'), return the correct known domain in suggested_domain.\n"
+        f"If the domain is completely unrelated and not close to any known domain (e.g. 'banana', 'finance', 'marketing'), "
+        f"leave suggested_domain as an empty string.\n\n"
+        f"Input Domain:\n{{domain}}"
+    ),
+    output_schema=DomainSimilarity,
+)
+
+
+def validate_domain_typo_result(ctx: Context, node_input: dict) -> Generator[Event, None, None]:
+    """Inspects the similarity agent result and either triggers RequestInput or logs wrong domain."""
+    suggested_domain = node_input.get("suggested_domain", "").strip().lower()
+    
+    if suggested_domain in KNOWN_DOMAINS:
+        yield RequestInput(
+            interrupt_id=f"domain_typo:{ctx.node_path}",
+            message=f"Did you mean '{suggested_domain}'?",
+            response_schema=str
+        )
+        yield Event(state={"suggested_domain": suggested_domain})
+    else:
+        ticket = ctx.state.get("ticket_text", "")
+        entry = {
+            "ticket": ticket,
+            "parsed_domain": ctx.state.get("domain", ""),
+            "reason": f"Unrelated domain suggested: {node_input.get('reason', '')}"
+        }
+        
+        with open("wrong_domain_queue.jsonl", "a") as f:
+            f.write(json.dumps(entry) + "\n")
+            
+        msg = f"Domain validation failed. Logged to wrong_domain_queue.jsonl. Unrelated domain name."
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="stop")
+
+
+def handle_domain_confirmation(ctx: Context, node_input: Any) -> Event:
+    """Handles the user's confirmation response for the domain typo."""
+    response = str(node_input).strip().lower()
+    
+    if response in ("yes", "y", "confirm", "true"):
+        suggested = ctx.state.get("suggested_domain", "")
+        return Event(
+            output=suggested,
+            route="ok",
+            state={"domain": suggested}
+        )
+    else:
+        msg = "User declined domain correction. Stopping execution."
+        return Event(
+            output=msg,
+            route="stop",
+            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+        )
+
+
+class EnvSimilarity(BaseModel):
+    suggested_env: str = Field(description="The closest matched known environment from the list of allowed environments, or empty string if it's completely unrelated.")
+    reason: str = Field(description="Reasoning for suggestion.")
+
+
+def check_env_exact(ctx: Context, node_input: Any) -> Event:
+    """Extracts environment, runs production guard, checks exact match or routes to typo check."""
+    from scripts.check_required_fields import parse_env_and_domain
+    ticket_text = ctx.state.get("ticket_text", "")
+    
+    env, domain = parse_env_and_domain(ticket_text)
+    
+    if env in ("prod", "production", "live"):
+        msg = "this repo holds non-production config only, so production must be handled by a human."
+        return Event(
+            output=msg,
+            route="prod_guard",
+            state={"missing_critical_fields": ["environment (production guard)"]}
+        )
+        
+    if not env:
+        return Event(output={"env": ""}, route="typo_check", state={"env": ""})
+        
+    if env in KNOWN_ENVS:
+        return Event(
+            output=node_input,
+            route="ok",
+            state={"environment": env}
+        )
+    else:
+        return Event(
+            output={"env": env},
+            route="typo_check",
+            state={"env": env}
+        )
+
+
+env_similarity_agent = LlmAgent(
+    name="env_similarity_agent",
+    model="gemini-3.1-flash-lite",
+    instruction=(
+        f"You are an expert environment validator. You are given an environment name that was parsed from a ticket.\n"
+        f"Your task is to compare it against our list of known allowed environments: {', '.join(KNOWN_ENVS)}.\n"
+        f"If the input environment is a likely typo of one of the known environments (e.g., 'stag' or 'staging' for 'stage', "
+        f"'develop' or 'deve' for 'dev'), return the correct known environment in suggested_env.\n"
+        f"If the environment is completely unrelated and not close to any known environment (e.g. 'xyz', 'production', 'live'), "
+        f"leave suggested_env as an empty string.\n\n"
+        f"Input Environment:\n{{env}}"
+    ),
+    output_schema=EnvSimilarity,
+)
+
+
+def validate_env_typo_result(ctx: Context, node_input: dict) -> Generator[Event, None, None]:
+    """Inspects the similarity agent result and either triggers RequestInput or logs wrong environment."""
+    suggested_env = node_input.get("suggested_env", "").strip().lower()
+    
+    if suggested_env in KNOWN_ENVS:
+        yield RequestInput(
+            interrupt_id=f"env_typo:{ctx.node_path}",
+            message=f"Did you mean '{suggested_env}'?",
+            response_schema=str
+        )
+        yield Event(state={"suggested_env": suggested_env})
+    else:
+        ticket = ctx.state.get("ticket_text", "")
+        entry = {
+            "ticket": ticket,
+            "parsed_env": ctx.state.get("env", ""),
+            "reason": f"Unrelated environment suggested: {node_input.get('reason', '')}"
+        }
+        
+        with open("wrong_domain_queue.jsonl", "a") as f:
+            f.write(json.dumps(entry) + "\n")
+            
+        msg = f"Environment validation failed. Logged to wrong_domain_queue.jsonl. Unrelated environment name."
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="stop")
+
+
+def handle_env_confirmation(ctx: Context, node_input: Any) -> Event:
+    """Handles the user's confirmation response for the environment typo."""
+    response = str(node_input).strip().lower()
+    
+    if response in ("yes", "y", "confirm", "true"):
+        suggested = ctx.state.get("suggested_env", "")
+        return Event(
+            output=suggested,
+            route="ok",
+            state={"environment": suggested}
+        )
+    else:
+        msg = "User declined environment correction. Stopping execution."
+        return Event(
+            output=msg,
+            route="stop",
+            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+        )
+
+
+def dispatch_by_category(ctx: Context, node_input: Any) -> Event:
+    """Dispatches execution to the category handler after domain validation succeeds."""
+    category = ctx.state.get("ticket_category")
+    return Event(output=node_input, route=category)
+
+
+def check_critical_fields(ctx: Context, node_input: dict) -> Event:
+    """Checks for critical identity/security fields and environment/domain settings."""
+    from scripts.check_required_fields import check_config_and_env
+    ticket_text = ctx.state.get("ticket_text", "")
+    resolved_domain = ctx.state.get("domain")
+    resolved_env = ctx.state.get("environment")
+    
+    res = check_config_and_env(node_input, ticket_text, resolved_domain, resolved_env)
+    missing = res["missing_fields"]
+    is_prod = res["is_prod"]
+    
+    if missing:
+        msg = f"Critical fields/metadata are missing: {', '.join(missing)}"
+        return Event(
+            output=msg,
+            route="needs_human",
+            state={"missing_critical_fields": missing},
+            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+        )
+    elif is_prod:
+        msg = "this repo holds non-production config only, so production must be handled by a human."
+        return Event(
+            output=msg,
+            route="needs_human",
+            state={"missing_critical_fields": ["environment (production guard)"]},
+            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+        )
+    else:
+        resolved_path = res["resolved_path"]
+        exists_str = "exists" if res["path_exists"] else "does not exist"
+        log_msg = f"Resolved target path: {resolved_path} ({exists_str})"
+        return Event(
+            output=node_input,
+            route="ok",
+            content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
+        )
 
 
 def validate_config(ctx: Context, node_input: dict) -> Generator[Event, None, None]:
@@ -206,11 +468,23 @@ def handle_new_full(node_input: dict) -> Generator[Event, None, None]:
     yield Event(output=msg)
 
 
-def handle_needs_human(node_input: dict) -> Generator[Event, None, None]:
-    """Yields 'not implemented yet' message for needs_human route."""
-    msg = "not implemented yet"
+def handle_needs_human(ctx: Context, node_input: Any) -> Generator[Event, None, None]:
+    """Appends the ticket and missing fields to a local queue and yields message."""
+    ticket = ctx.state.get("ticket_text", "")
+    missing_fields = ctx.state.get("missing_critical_fields", [])
+    
+    entry = {
+        "ticket": ticket,
+        "missing_critical_fields": missing_fields,
+        "reason": str(node_input)
+    }
+    
+    with open("needs_human_queue.jsonl", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+        
+    msg = f"Ticket routed to human review. Logged to needs_human_queue.jsonl. Reason: {node_input}"
     yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
-    yield Event(output=msg)
+    yield Event(output=entry)
 
 
 # Graph definition
@@ -221,12 +495,40 @@ root_agent = Workflow(
         (save_ticket, classifier_agent),
         (classifier_agent, route_ticket),
         (route_ticket, {
+            'ok': check_domain_exact,
+            'needs_human': handle_needs_human,
+        }),
+        (check_domain_exact, {
+            'ok': check_env_exact,
+            'typo_check': domain_similarity_agent,
+        }),
+        (domain_similarity_agent, validate_domain_typo_result),
+        (validate_domain_typo_result, handle_domain_confirmation),
+        (handle_domain_confirmation, {
+            'ok': check_env_exact,
+            'stop': handle_needs_human,
+        }),
+        (check_env_exact, {
+            'ok': dispatch_by_category,
+            'typo_check': env_similarity_agent,
+            'prod_guard': handle_needs_human,
+        }),
+        (env_similarity_agent, validate_env_typo_result),
+        (validate_env_typo_result, handle_env_confirmation),
+        (handle_env_confirmation, {
+            'ok': dispatch_by_category,
+            'stop': handle_needs_human,
+        }),
+        (dispatch_by_category, {
             'config_only': config_generator,
             'model_only': handle_model_only,
             'new_full': handle_new_full,
+        }),
+        (config_generator, check_critical_fields),
+        (check_critical_fields, {
+            'ok': validate_config,
             'needs_human': handle_needs_human,
         }),
-        (config_generator, validate_config),
         (validate_config, {
             'retry': config_generator,
             'needs_human': handle_needs_human,
@@ -237,4 +539,5 @@ root_agent = Workflow(
 app = App(
     root_agent=root_agent,
     name="app",
+    resumability_config=ResumabilityConfig(is_resumable=True),
 )

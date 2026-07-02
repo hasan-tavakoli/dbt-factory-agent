@@ -204,3 +204,12 @@ tools/a2a-inspector/
 
 # Generated config.json
 config.json
+
+# Human handoff queue
+needs_human_queue.jsonl
+
+# Wrong domain queue
+wrong_domain_queue.jsonl
+
+# Interactive test helper
+scripts/test_interactive.py
