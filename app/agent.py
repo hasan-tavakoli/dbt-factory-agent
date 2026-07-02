@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.workflow import Workflow
 from google.adk.events.event import Event
@@ -511,6 +512,14 @@ def handle_config_only(node_input: dict) -> Generator[Event, None, None]:
     yield Event(output=node_input)
 
 
+config_agent_remote = RemoteA2aAgent(
+    name="dv_config_agent",
+    description="Remote config-agent that builds/updates dbt config and opens a PR.",
+    agent_card="http://localhost:8001/.well-known/agent-card.json",
+    timeout=300.0,
+)
+
+
 intent_extractor = LlmAgent(
     name="intent_extractor",
     model="gemini-3.1-flash-lite",
@@ -688,7 +697,7 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
         log_msg = f"Assembled payload for config-agent:\n```json\n{payload_str}\n```"
         print(log_msg)
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)]))
-        yield Event(output=payload, route="ok")
+        yield Event(output=payload_str, route="ok")
 
 
 def stop_for_user_input(node_input: Any) -> Event:
@@ -743,7 +752,7 @@ def handle_schedule_response(ctx: Context, node_input: Any) -> Event:
         log_msg = f"Assembled payload for config-agent:\n```json\n{payload_str}\n```"
         print(log_msg)
         return Event(
-            output=payload,
+            output=payload_str,
             route="ok",
             state={"pending_schedule_payload": None},
             content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
@@ -1117,12 +1126,14 @@ root_agent = Workflow(
         (model_intent_extractor, validate_config_only_payload),
         (validate_config_only_payload, {
             'ok_model': prepare_model_builder_input,
+            'ok': config_agent_remote,
             'ask_schedule': stop_for_user_input,
             'needs_human': handle_needs_human,
         }),
         # handle_schedule_response is reached via save_ticket -> resume_schedule
         (handle_schedule_response, {
             'ok_model': prepare_model_builder_input,
+            'ok': config_agent_remote,
         }),
         (prepare_model_builder_input, model_builder),
         (model_builder, validate_and_push_model),
