@@ -106,6 +106,33 @@ class VibeDiffSummary(BaseModel):
     )
 
 
+class IntentPayload(BaseModel):
+    service_account: str | None = Field(
+        default=None,
+        description="The GCP service account to impersonate (e.g., service-account@project.iam.gserviceaccount.com). Leave empty if not found."
+    )
+    execution_project: str | None = Field(
+        default=None,
+        description="The GCP project where the job executes (e.g. execution-project-id). Leave empty if not found."
+    )
+    target_project: str | None = Field(
+        default=None,
+        description="The GCP target project/DBT_PROJECT (e.g. target-project-id). Leave empty if not found."
+    )
+    dag_id: str | None = Field(
+        default=None,
+        description="The Airflow DAG ID (e.g. daily_active_customers_dag). Leave empty if not found."
+    )
+    schedule: str | None = Field(
+        default=None,
+        description="The cron schedule (e.g. '0 6 * * *'). Leave empty if not found."
+    )
+    config_intent: str | None = Field(
+        default=None,
+        description="Any specific config intent/wishes explicitly requested by the user, such as omitting a step (e.g., 'no public step') or custom behavior. Leave empty if there is no explicit structural exception."
+    )
+
+
 # Nodes logic
 def save_ticket(ctx: Context, node_input: types.Content) -> Event:
     """Extracts raw text from the input content and saves it to workflow state."""
@@ -469,6 +496,114 @@ def handle_config_only(node_input: dict) -> Generator[Event, None, None]:
     yield Event(output=node_input)
 
 
+intent_extractor = LlmAgent(
+    name="intent_extractor",
+    model="gemini-3.1-flash-lite",
+    instruction=(
+        "You are an expert data engineering assistant. Analyze the incoming Jira ticket text and "
+        "extract the configuration fields requested. If any field is not mentioned in the ticket, "
+        "leave it as empty or null. Do not invent any values.\n\n"
+        "Jira Ticket Text:\n{ticket_text}"
+    ),
+    output_schema=IntentPayload,
+)
+
+
+def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Event:
+    """
+    Validates completeness of the extracted payload for config_only category.
+    If required fields are missing, routes to needs_human.
+    Otherwise, logs the payload and returns it.
+    """
+    from scripts.check_required_fields import check_config_and_env
+    ticket_text = ctx.state.get("ticket_text", "")
+    resolved_domain = ctx.state.get("domain")
+    resolved_env = ctx.state.get("environment")
+    
+    # Get values from IntentPayload
+    service_account = getattr(node_input, "service_account", "") or ""
+    execution_project = getattr(node_input, "execution_project", "") or ""
+    target_project = getattr(node_input, "target_project", "") or ""
+    dag_id = getattr(node_input, "dag_id", "") or ""
+    schedule = getattr(node_input, "schedule", "") or ""
+    config_intent = getattr(node_input, "config_intent", "") or ""
+    
+    # Run deterministic check we already have (check_config_and_env)
+    # Construct mock_data structure matching RootConfig schema checked by check_config_and_env
+    mock_data = {
+        "dag_configs": [
+            {
+                "dag_config": {
+                    "dag_id": dag_id,
+                    "schedule": schedule,
+                },
+                "job_config": {
+                    "env_variables": {
+                        "DBT_IMPERSONATE_SERVICE_ACCOUNT": service_account,
+                        "DBT_EXECUTION_PROJECT": execution_project,
+                        "DBT_PROJECT": target_project,
+                    }
+                }
+            }
+        ]
+    }
+    
+    res = check_config_and_env(mock_data, ticket_text, resolved_domain, resolved_env)
+    missing = res["missing_fields"]
+    
+    # Ensure dag_id and schedule are also validated as missing if empty
+    if not dag_id.strip():
+        if "dag_id" not in missing:
+            missing.append("dag_id")
+    if not schedule.strip():
+        if "schedule" not in missing:
+            missing.append("schedule")
+            
+    # Check for prod guard
+    is_prod = res["is_prod"]
+    
+    if missing:
+        msg = f"Critical fields/metadata are missing: {', '.join(missing)}"
+        return Event(
+            output=msg,
+            route="needs_human",
+            state={"missing_critical_fields": missing},
+            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+        )
+    elif is_prod:
+        msg = "this repo holds non-production config only, so production must be handled by a human."
+        return Event(
+            output=msg,
+            route="needs_human",
+            state={"missing_critical_fields": ["environment (production guard)"]},
+            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+        )
+    else:
+        # Assemble payload
+        payload = {
+            "domain": resolved_domain,
+            "environment": resolved_env,
+            "dag_id": dag_id,
+            "schedule": schedule,
+            "service_account": service_account,
+            "execution_project": execution_project,
+            "target_project": target_project,
+            "config_intent": config_intent
+        }
+        
+        # Log the payload in output and model content
+        import json
+        payload_str = json.dumps(payload, indent=2)
+        log_msg = f"Assembled payload for config-agent:\n```json\n{payload_str}\n```"
+        print(log_msg)
+        
+        return Event(
+            output=payload,
+            route="ok",
+            content=types.Content(role='model', parts=[types.Part.from_text(text=log_msg)])
+        )
+
+
 # model_builder LlmAgent: generates ONLY text (dbt SQL & _schema.yml).
 # It must never execute code, touch files, or run git directly.
 model_builder = LlmAgent(
@@ -818,9 +953,13 @@ root_agent = Workflow(
             'stop': handle_needs_human,
         }),
         (dispatch_by_category, {
-            'config_only': config_generator,
+            'config_only': intent_extractor,
             'model_only': prepare_model_builder_input,
             'new_full': handle_new_full,
+        }),
+        (intent_extractor, validate_config_only_payload),
+        (validate_config_only_payload, {
+            'needs_human': handle_needs_human,
         }),
         (prepare_model_builder_input, model_builder),
         (model_builder, validate_and_push_model),
@@ -830,15 +969,6 @@ root_agent = Workflow(
         }),
         (prepare_pr_summarizer_input, pr_summarizer),
         (pr_summarizer, create_pull_request),
-        (config_generator, check_critical_fields),
-        (check_critical_fields, {
-            'ok': validate_config,
-            'needs_human': handle_needs_human,
-        }),
-        (validate_config, {
-            'retry': config_generator,
-            'needs_human': handle_needs_human,
-        }),
     ]
 )
 

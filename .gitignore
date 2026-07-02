@@ -212,3 +212,4 @@ config.json
 scripts/test_interactive.py
 scripts/test_model_only.py
 scripts/test_pr_creation.py
+scripts/test_config_only.py
