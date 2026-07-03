@@ -868,7 +868,40 @@ def prepare_model_builder_input(ctx: Context, node_input: Any) -> Event:
     )
     return Event(output=prompt)
 
-def validate_and_push_model(ctx: Context, node_input: str) -> Generator[Event, None, None]:
+def check_sql_safety_early(ctx: Context, node_input: str) -> Generator[Event, None, None]:
+    """Parses model_builder output, runs early SQL safety check, and routes accordingly."""
+    import re
+    from scripts.check_sql_safety import check_sql_safety
+
+    text = node_input or ""
+
+    # Parse SQL block from markdown
+    sql_match = re.search(r'```sql\s*([\s\S]*?)```', text)
+    sql_content = sql_match.group(1).strip() if sql_match else ""
+
+    if not sql_content:
+        msg = "Model generation failed: No SQL block found in LLM response."
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="unsafe", state={"missing_critical_fields": ["SQL block generation"]})
+        return
+
+    # Deterministic SQL Safety Check
+    is_safe, safety_reason = check_sql_safety(sql_content)
+    if not is_safe:
+        msg = f"SQL safety check rejected the model code:\nReason: {safety_reason}"
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="unsafe", state={"missing_critical_fields": ["SQL safety check"]})
+        return
+
+    # If safe, store in state and proceed
+    yield Event(
+        output=node_input,
+        route="safe",
+        state={"generated_text": text}
+    )
+
+
+def validate_and_push_model(ctx: Context, node_input: Any) -> Generator[Event, None, None]:
     """
     Parses LLM output, performs a deterministic SQL safety check,
     and pushes the files to a feature branch in a secure temp directory.
@@ -881,7 +914,7 @@ def validate_and_push_model(ctx: Context, node_input: str) -> Generator[Event, N
     from scripts.check_sql_safety import check_sql_safety
     from dotenv import load_dotenv
 
-    text = node_input or ""
+    text = ctx.state.get("generated_text", "") or ""
 
     # Parse SQL and YAML blocks from markdown
     sql_match = re.search(r'```sql\s*([\s\S]*?)```', text)
@@ -1173,7 +1206,10 @@ root_agent = Workflow(
             'typo_check': domain_similarity_agent,
         }),
         (domain_similarity_agent, validate_domain_typo_result),
-        (validate_domain_typo_result, handle_domain_confirmation),
+        (validate_domain_typo_result, {
+            'stop': handle_needs_human,
+            '__DEFAULT__': handle_domain_confirmation,
+        }),
         (handle_domain_confirmation, {
             'ok': check_env_exact,
             'stop': handle_needs_human,
@@ -1184,7 +1220,10 @@ root_agent = Workflow(
             'prod_guard': handle_needs_human,
         }),
         (env_similarity_agent, validate_env_typo_result),
-        (validate_env_typo_result, handle_env_confirmation),
+        (validate_env_typo_result, {
+            'stop': handle_needs_human,
+            '__DEFAULT__': handle_env_confirmation,
+        }),
         (handle_env_confirmation, {
             'ok': dispatch_by_category,
             'stop': handle_needs_human,
@@ -1195,20 +1234,24 @@ root_agent = Workflow(
             'new_full': handle_new_full,
         }),
         (intent_extractor, validate_config_only_payload),
-        (model_intent_extractor, validate_config_only_payload),
+        (model_intent_extractor, prepare_model_builder_input),
+        (prepare_model_builder_input, model_builder),
+        (model_builder, check_sql_safety_early),
+        (check_sql_safety_early, {
+            'unsafe': handle_needs_human,
+            'safe': validate_config_only_payload,
+        }),
         (validate_config_only_payload, {
-            'ok_model': prepare_model_builder_input,
+            'ok_model': validate_and_push_model,
             'ok': publish_config_only_payload,
             'ask_schedule': stop_for_user_input,
             'needs_human': handle_needs_human,
         }),
         # handle_schedule_response is reached via save_ticket -> resume_schedule
         (handle_schedule_response, {
-            'ok_model': prepare_model_builder_input,
+            'ok_model': validate_and_push_model,
             'ok': publish_config_only_payload,
         }),
-        (prepare_model_builder_input, model_builder),
-        (model_builder, validate_and_push_model),
         (validate_and_push_model, {
             'ok': prepare_pr_summarizer_input,
             'needs_human': handle_needs_human,

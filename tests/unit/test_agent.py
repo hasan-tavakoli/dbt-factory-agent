@@ -576,3 +576,29 @@ def test_handle_env_confirmation_no():
     event = handle_env_confirmation(ctx, "no")
     assert event.actions.route == "stop"
     assert "User declined" in event.content.parts[0].text
+
+
+def test_check_sql_safety_early_safe():
+    from unittest.mock import MagicMock
+    from app.agent import check_sql_safety_early
+    
+    ctx = MagicMock(spec=Context)
+    node_input = "Here is the SQL:\n```sql\nselect * from raw.bets;\n```"
+    
+    events = list(check_sql_safety_early(ctx, node_input))
+    assert len(events) == 1
+    assert events[0].actions.route == "safe"
+    assert events[0].actions.state_delta["generated_text"] == node_input
+
+
+def test_check_sql_safety_early_unsafe():
+    from unittest.mock import MagicMock
+    from app.agent import check_sql_safety_early
+    
+    ctx = MagicMock(spec=Context)
+    node_input = "Here is the SQL:\n```sql\ndrop table raw.bets;\n```"
+    
+    events = list(check_sql_safety_early(ctx, node_input))
+    assert len(events) == 2
+    assert "SQL safety check rejected" in events[0].content.parts[0].text
+    assert events[1].actions.route == "unsafe"
