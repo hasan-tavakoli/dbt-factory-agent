@@ -15,16 +15,12 @@
 import logging
 import os
 
-import google.auth
-from google.adk.cli.api_server import _setup_instrumentation_lib_if_installed
-from google.adk.telemetry.google_cloud import get_gcp_exporters, get_gcp_resource
-from google.adk.telemetry.setup import maybe_set_otel_providers
-
 
 def setup_telemetry() -> str | None:
     """Configure GenAI prompt/response logging via OpenTelemetry."""
     # Keep full prompts/responses out of trace span attributes (use GenAI logging instead).
     os.environ.setdefault("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", "false")
+    os.environ.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", "true")
 
     bucket = os.environ.get("LOGS_BUCKET_NAME")
     capture_content = os.environ.get(
@@ -55,21 +51,24 @@ def setup_telemetry() -> str | None:
             "Prompt-response logging disabled (set LOGS_BUCKET_NAME=gs://your-bucket and OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT to enable)"
         )
 
-    # Set up OpenTelemetry exporters for Cloud Trace and Cloud Logging
-    credentials, project_id = google.auth.default()
-    otel_hooks = get_gcp_exporters(
-        enable_cloud_tracing=True,
-        enable_cloud_metrics=False,
-        enable_cloud_logging=True,
-        google_auth=(credentials, project_id),
-    )
-    otel_resource = get_gcp_resource(project_id)
-    maybe_set_otel_providers(
-        otel_hooks_to_setup=[otel_hooks],
-        otel_resource=otel_resource,
-    )
-
-    # Set up GenAI SDK instrumentation
-    _setup_instrumentation_lib_if_installed()
-
     return bucket
+
+
+def setup_agent_engine_telemetry() -> None:
+    """Install the Agent Engine tracer provider (traces/logs to the customer project).
+
+    Tags spans with the reasoningEngine resource. The OTel resource is fixed at
+    provider creation, so this must run before get_fast_api_app to set the tags.
+    No-op unless GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY is set.
+    """
+    if os.environ.get("GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", "").lower() not in (
+        "true",
+        "1",
+    ):
+        return
+
+    import google.auth
+    from vertexai.agent_engines.templates.adk import _default_instrumentor_builder
+
+    _, project_id = google.auth.default()
+    _default_instrumentor_builder(project_id, enable_tracing=True, enable_logging=True)

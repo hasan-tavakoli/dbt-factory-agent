@@ -236,3 +236,30 @@ def test_collect_feedback(server_fixture: subprocess.Popen[str]) -> None:
         FEEDBACK_URL, json=feedback_data, headers=HEADERS, timeout=10
     )
     assert response.status_code == 200
+
+
+def test_reasoning_engine_stream(server_fixture: subprocess.Popen[str]) -> None:
+    """The reasoning_engine adapter (/api/stream_reasoning_engine) runs the agent.
+
+    This is the contract Agent Engine forwards :streamQuery calls to.
+    """
+    response = requests.post(
+        f"{BASE_URL}/api/stream_reasoning_engine",
+        headers=HEADERS,
+        json={
+            "class_method": "async_stream_query",
+            "input": {"user_id": f"u-{uuid.uuid4()}", "message": "Hi!"},
+        },
+        stream=True,
+        timeout=60,
+    )
+    assert response.status_code == 200
+
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert events, "No events from reasoning_engine adapter"
+    has_text = any(
+        (event.get("content") or {}).get("parts")
+        and any(part.get("text") for part in event["content"]["parts"])
+        for event in events
+    )
+    assert has_text, "No text content in reasoning_engine events"
