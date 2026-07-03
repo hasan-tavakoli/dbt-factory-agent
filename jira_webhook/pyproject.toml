@@ -1,0 +1,13 @@
+[project]
+name = "dv-jira-webhook"
+version = "0.1.0"
+description = "FastAPI handler to publish incoming Jira tickets to Pub/Sub for the ADK orchestrator"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+    "google-cloud-pubsub>=2.20.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
