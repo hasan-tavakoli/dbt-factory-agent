@@ -514,27 +514,72 @@ def handle_config_only(node_input: dict) -> Generator[Event, None, None]:
 
 def call_remote_config_agent(ctx: Context, node_input: Any) -> Generator[Event, None, None]:
     """
-    Calls the remote config-agent A2A server at http://localhost:8001 directly
-    via JSON-RPC to avoid RemoteA2aAgent forwarding the user's session history (the ticket text)
-    instead of the assembled config payload.
+    Calls the remote config-agent deployed on Vertex AI Agent Runtime
+    via A2A JSON-RPC, injecting a Google ADC bearer token so the request
+    is authenticated against the Agent Runtime IAM endpoint.
+
+    The A2A endpoint is the config-agent's Agent Runtime A2A card URL:
+      https://europe-west1-aiplatform.googleapis.com/reasoningEngines/v1/
+      projects/841480568387/locations/europe-west1/
+      reasoningEngines/8933549567866044416/api/a2a/app/
+
+    Auth: uses Application Default Credentials (ADC) with
+    https://www.googleapis.com/auth/cloud-platform scope. On Agent Runtime
+    the orchestrator's service account is used automatically by ADC.
     """
-    import urllib.request
-    import urllib.error
     import json
     import uuid
-    from google.adk.events.event import Event
-    from google.genai import types
-    
-    url = "http://localhost:8001"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    
-    # payload_str is passed in as node_input
+
+    # ── imports that may not be at module-top ────────────────────────────────
+    try:
+        import httpx
+        import google.auth
+        import google.auth.transport.requests as google_requests
+    except ImportError as e:
+        err_msg = f"Missing dependency for Agent Runtime A2A call: {e}. Ensure google-auth and httpx are installed."
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
+        yield Event(output={"error": err_msg})
+        return
+
+    # ── Agent Runtime A2A endpoint for the config-agent ─────────────────────
+    # The base URL is the Agent Runtime reasoning engine's /api/a2a/app/ path.
+    # We POST the JSON-RPC body directly to this URL (it is the RPC endpoint).
+    CONFIG_AGENT_A2A_BASE = (
+        "https://europe-west1-aiplatform.googleapis.com"
+        "/reasoningEngines/v1"
+        "/projects/841480568387"
+        "/locations/europe-west1"
+        "/reasoningEngines/8933549567866044416"
+        "/api/a2a/app"
+    )
+
+    # ── Google ADC bearer-token httpx.Auth ───────────────────────────────────
+    class _GoogleBearerAuth(httpx.Auth):
+        """Injects a refreshed Google ADC bearer token into every httpx request."""
+
+        def __init__(self) -> None:
+            import requests as _requests  # stdlib-backed transport for token refresh
+            self._credentials, _ = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            self._transport = google_requests.Request(session=_requests.Session())
+
+        def _refresh(self) -> None:
+            if not self._credentials.valid:
+                self._credentials.refresh(self._transport)
+
+        def auth_flow(self, request):
+            self._refresh()
+            request.headers["Authorization"] = f"Bearer {self._credentials.token}"
+            response = yield request
+            # Retry once on 401 (token may have just expired mid-flight)
+            if response.status_code == 401:
+                self._refresh()
+                request.headers["Authorization"] = f"Bearer {self._credentials.token}"
+                yield request
+
+    # ── build the request ────────────────────────────────────────────────────
     payload_str = str(node_input)
-    
-    # Construct standard JSON-RPC 2.0 message/send request
     message_id = str(uuid.uuid4())
     req_body = {
         "jsonrpc": "2.0",
@@ -543,84 +588,107 @@ def call_remote_config_agent(ctx: Context, node_input: Any) -> Generator[Event, 
             "message": {
                 "message_id": message_id,
                 "role": "user",
-                "parts": [
-                    {
-                        "text": payload_str
-                    }
-                ]
+                "parts": [{"text": payload_str}],
             }
         },
-        "id": 1
+        "id": 1,
     }
-    
-    msg = f"Sending assembled JSON payload to remote config-agent at {url}..."
+
+    msg = f"Sending assembled JSON payload to remote config-agent on Agent Runtime..."
     yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
-    
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(req_body).encode("utf-8"),
-        headers=headers,
-        method="POST"
-    )
-    
+
+    # ── fire the JSON-RPC call with auth ─────────────────────────────────────
+    import asyncio
+
+    async def _post() -> dict:
+        async with httpx.AsyncClient(
+            auth=_GoogleBearerAuth(),
+            timeout=httpx.Timeout(300.0),
+        ) as client:
+            resp = await client.post(
+                CONFIG_AGENT_A2A_BASE,
+                content=json.dumps(req_body).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     try:
-        # A2A task timeout is 300s
-        with urllib.request.urlopen(req, timeout=300) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            
-            if "error" in res_data:
-                err = res_data["error"]
-                err_msg = f"Remote config-agent returned error: {err.get('message', err)}"
-                yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
-                yield Event(output={"error": err_msg})
-                return
-                
-            result = res_data.get("result", {})
-            
-            # Extract output text from history or directly from Message/Task
-            text_output = ""
-            if isinstance(result, dict) and "history" in result:
-                history = result.get("history", [])
-                agent_texts = []
-                for msg in history:
-                    if isinstance(msg, dict) and msg.get("role") in ("agent", "model"):
-                        parts = msg.get("parts", [])
-                        txt = "".join(part.get("text", "") for part in parts if isinstance(part, dict) and "text" in part)
-                        if txt.strip():
-                            agent_texts.append(txt.strip())
-                if agent_texts:
-                    # Join all agent messages with clear separation
-                    text_output = "\n\n".join(agent_texts)
-            
-            if not text_output and isinstance(result, dict):
-                if result.get("kind") == "message":
-                    parts = result.get("parts", [])
-                    text_output = "".join(part.get("text", "") for part in parts if isinstance(part, dict) and "text" in part)
-                elif result.get("kind") == "task":
-                    status = result.get("status", {})
-                    output_msg = status.get("output", {})
-                    parts = output_msg.get("parts", [])
-                    text_output = "".join(part.get("text", "") for part in parts if isinstance(part, dict) and "text" in part)
-            
-            if not text_output:
-                # Fallback serializing the result
-                text_output = json.dumps(result, indent=2)
-                
-            if not text_output.strip():
-                text_output = "Remote config-agent completed execution but returned no output text."
-                
-            yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=text_output)]))
-            yield Event(output=text_output)
-            
-    except urllib.error.URLError as e:
-        err_msg = f"Failed to connect to remote config-agent at {url}. Make sure uvicorn is running on port 8001. Error details: {e.reason}"
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We are inside an async context (ADK runner); use a thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(asyncio.run, _post())
+                    res_data = future.result(timeout=310)
+            else:
+                res_data = loop.run_until_complete(_post())
+        except RuntimeError:
+            res_data = asyncio.run(_post())
+
+        if "error" in res_data:
+            err = res_data["error"]
+            err_msg = f"Remote config-agent returned JSON-RPC error: {err.get('message', err)}"
+            yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
+            yield Event(output={"error": err_msg})
+            return
+
+        result = res_data.get("result", {})
+
+        # Extract agent output from history (Agent Runtime always returns history)
+        text_output = ""
+        if isinstance(result, dict) and "history" in result:
+            agent_texts = [
+                "".join(
+                    part.get("text", "")
+                    for part in msg.get("parts", [])
+                    if isinstance(part, dict) and "text" in part
+                )
+                for msg in result.get("history", [])
+                if isinstance(msg, dict) and msg.get("role") in ("agent", "model")
+            ]
+            text_output = "\n\n".join(t for t in agent_texts if t.strip())
+
+        if not text_output and isinstance(result, dict):
+            if result.get("kind") == "message":
+                parts = result.get("parts", [])
+                text_output = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p)
+            elif result.get("kind") == "task":
+                output_msg = result.get("status", {}).get("output", {})
+                parts = output_msg.get("parts", [])
+                text_output = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p)
+
+        if not text_output:
+            text_output = json.dumps(result, indent=2)
+        if not text_output.strip():
+            text_output = "Remote config-agent completed but returned no output text."
+
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=text_output)]))
+        yield Event(output=text_output)
+
+    except httpx.HTTPStatusError as e:
+        err_msg = (
+            f"Agent Runtime A2A call failed: HTTP {e.response.status_code}. "
+            f"Check IAM — orchestrator SA needs roles/aiplatform.user on project 841480568387. "
+            f"Details: {e.response.text[:500]}"
+        )
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
         yield Event(output={"error": err_msg})
-        
+
     except Exception as e:
-        err_msg = f"An unexpected error occurred while calling remote config-agent: {e}"
+        err_msg = (
+            f"Unexpected error calling remote config-agent on Agent Runtime: {e}. "
+            f"If running locally, make sure ADC is set (gcloud auth application-default login)."
+        )
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
         yield Event(output={"error": err_msg})
+
+
+
 
 
 intent_extractor = LlmAgent(
