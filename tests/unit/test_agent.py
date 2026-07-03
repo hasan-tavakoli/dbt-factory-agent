@@ -455,6 +455,31 @@ def test_handle_domain_confirmation_no():
     assert "User declined" in event.content.parts[0].text
 
 
+def test_handle_domain_confirmation_override():
+    from unittest.mock import MagicMock
+    from app.agent import handle_domain_confirmation
+    
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"suggested_domain": "sports"}
+    
+    event = handle_domain_confirmation(ctx, "wallet")
+    assert event.actions.route == "ok"
+    assert event.actions.state_delta["domain"] == "wallet"
+    assert event.output == "wallet"
+
+
+def test_handle_domain_confirmation_unrecognized():
+    from unittest.mock import MagicMock
+    from app.agent import handle_domain_confirmation
+    
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"suggested_domain": "sports"}
+    
+    event = handle_domain_confirmation(ctx, "banana")
+    assert event.actions.route == "stop"
+    assert "Unrecognized domain response" in event.content.parts[0].text
+
+
 def test_check_env_exact_success():
     from unittest.mock import MagicMock
     from app.agent import check_env_exact

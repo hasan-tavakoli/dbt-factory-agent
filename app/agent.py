@@ -283,7 +283,11 @@ def validate_domain_typo_result(ctx: Context, node_input: dict) -> Generator[Eve
 
 
 def handle_domain_confirmation(ctx: Context, node_input: Any) -> Event:
-    """Handles the user's confirmation response for the domain typo."""
+    """Handles the user's confirmation response for the domain typo.
+    
+    Proceeds with the suggested domain on affirmatives, overrides with a valid
+    known domain if the user typed it explicitly, and stops on negatives or unrecognized input.
+    """
     response = str(node_input).strip().lower()
     
     if response in ("yes", "y", "confirm", "true"):
@@ -293,8 +297,21 @@ def handle_domain_confirmation(ctx: Context, node_input: Any) -> Event:
             route="ok",
             state={"domain": suggested}
         )
-    else:
+    elif response in KNOWN_DOMAINS:
+        return Event(
+            output=response,
+            route="ok",
+            state={"domain": response}
+        )
+    elif response in ("no", "n", "cancel", "false"):
         msg = "User declined domain correction. Stopping execution."
+        return Event(
+            output=msg,
+            route="stop",
+            content=types.Content(role='model', parts=[types.Part.from_text(text=msg)])
+        )
+    else:
+        msg = f"Unrecognized domain response '{response}'. Stopping execution."
         return Event(
             output=msg,
             route="stop",
