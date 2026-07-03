@@ -1,0 +1,75 @@
+<svg width="720" height="640" viewBox="0 0 720 640" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+  <style>
+    .bg{fill:#ffffff}
+    .title{fill:#1a1a2e;font-size:18px;font-weight:700}
+    .h{font-size:13px;font-weight:600}
+    .s{font-size:11px}
+    .xs{font-size:10.5px}
+    .gray{fill:#f1f3f5;stroke:#adb5bd}.grayT{fill:#343a40}
+    .blue{fill:#eaf2ff;stroke:#4a86e8}.blueT{fill:#1a4480}
+    .red{fill:#fdecec;stroke:#e24b4a}.redT{fill:#a01f1e}
+    .amber{fill:#fff6e6;stroke:#e0a53a}.amberT{fill:#8a5a00}
+    .green{fill:#e9f7ec;stroke:#4caf50}.greenT{fill:#1e6b25}
+    .teal{fill:#e6f7f4;stroke:#20b2aa}.tealT{fill:#0b6157}
+    .arr{stroke:#495057;stroke-width:1.7;fill:none}
+    .arrR{stroke:#e24b4a;stroke-width:1.7;fill:none}
+    .lbl{fill:#6c757d;font-size:10.5px}
+    .lblR{fill:#a01f1e;font-size:10.5px}
+  </style>
+  <rect class="bg" x="0" y="0" width="720" height="640"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#495057" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#e24b4a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <text class="title" x="40" y="38">Config agent — internal flow</text>
+
+  <rect class="teal" x="260" y="60" width="200" height="46" rx="8"/>
+  <text class="h tealT" x="360" y="80" text-anchor="middle">event from queue</text>
+  <text class="s tealT" x="360" y="97" text-anchor="middle">dv-model-image-ready</text>
+
+  <rect class="gray" x="260" y="134" width="200" height="46" rx="8"/>
+  <text class="h grayT" x="360" y="154" text-anchor="middle">resolve target path</text>
+  <text class="s grayT" x="360" y="171" text-anchor="middle">&lt;env&gt;/&lt;domain&gt;/&lt;dag&gt;/config.json</text>
+  <line x1="360" y1="106" x2="360" y2="132" class="arr" marker-end="url(#a)"/>
+
+  <!-- decision: exists? -->
+  <rect class="blue" x="260" y="208" width="200" height="52" rx="8"/>
+  <text class="h blueT" x="360" y="228" text-anchor="middle">create vs update?</text>
+  <text class="xs blueT" x="360" y="245" text-anchor="middle">decided by `source`, not guesswork</text>
+  <line x1="360" y1="180" x2="360" y2="206" class="arr" marker-end="url(#a)"/>
+
+  <!-- guard: model + missing -> reject -->
+  <rect class="red" x="500" y="206" width="200" height="56" rx="8"/>
+  <text class="h redT" x="600" y="226" text-anchor="middle">refuse to create</text>
+  <text class="xs redT" x="600" y="243" text-anchor="middle">model event for a config that</text>
+  <text class="xs redT" x="600" y="256" text-anchor="middle">doesn't exist → needs_human</text>
+  <path d="M460 234 L498 234" class="arrR" marker-end="url(#ar)"/>
+
+  <!-- script-first build -->
+  <rect class="gray" x="200" y="298" width="320" height="46" rx="8"/>
+  <text class="h grayT" x="360" y="318" text-anchor="middle">script-first: build config deterministically</text>
+  <text class="s grayT" x="360" y="335" text-anchor="middle">generate/patch config.json + deploy.yml in code</text>
+  <line x1="360" y1="260" x2="360" y2="296" class="arr" marker-end="url(#a)"/>
+
+  <!-- LLM fallback -->
+  <rect class="amber" x="200" y="372" width="320" height="46" rx="8"/>
+  <text class="h amberT" x="360" y="392" text-anchor="middle">LLM fallback — only if needed</text>
+  <text class="s amberT" x="360" y="409" text-anchor="middle">non-standard steps / PR summary · saves cost</text>
+  <line x1="360" y1="344" x2="360" y2="370" class="arr" marker-end="url(#a)"/>
+
+  <!-- keep by source -->
+  <rect class="gray" x="200" y="446" width="320" height="46" rx="8"/>
+  <text class="h grayT" x="360" y="466" text-anchor="middle">preserve by source</text>
+  <text class="s grayT" x="360" y="483" text-anchor="middle">config_only keeps image · model keeps schedule</text>
+  <line x1="360" y1="418" x2="360" y2="444" class="arr" marker-end="url(#a)"/>
+
+  <!-- validate -->
+  <rect class="blue" x="200" y="520" width="320" height="42" rx="8"/>
+  <text class="h blueT" x="360" y="546" text-anchor="middle">deterministic validate (schema check)</text>
+  <line x1="360" y1="492" x2="360" y2="518" class="arr" marker-end="url(#a)"/>
+
+  <!-- PR -->
+  <rect class="green" x="200" y="586" width="320" height="42" rx="8"/>
+  <text class="h greenT" x="360" y="612" text-anchor="middle">open config PR → human merges</text>
+  <line x1="360" y1="562" x2="360" y2="584" class="arr" marker-end="url(#a)"/>
+</svg>

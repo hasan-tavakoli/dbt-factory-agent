@@ -1,0 +1,101 @@
+<svg width="720" height="760" viewBox="0 0 720 760" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+  <style>
+    .bg{fill:#ffffff}
+    .title{fill:#1a1a2e;font-size:18px;font-weight:700}
+    .h{font-size:13px;font-weight:600}
+    .s{font-size:11px}
+    .gray{fill:#f1f3f5;stroke:#adb5bd}.grayT{fill:#343a40}
+    .blue{fill:#eaf2ff;stroke:#4a86e8}.blueT{fill:#1a4480}
+    .red{fill:#fdecec;stroke:#e24b4a}.redT{fill:#a01f1e}
+    .amber{fill:#fff6e6;stroke:#e0a53a}.amberT{fill:#8a5a00}
+    .green{fill:#e9f7ec;stroke:#4caf50}.greenT{fill:#1e6b25}
+    .teal{fill:#e6f7f4;stroke:#20b2aa}.tealT{fill:#0b6157}
+    .arr{stroke:#495057;stroke-width:1.7;fill:none}
+    .arrR{stroke:#e24b4a;stroke-width:1.7;fill:none}
+    .lbl{fill:#6c757d;font-size:10.5px}
+    .lblR{fill:#a01f1e;font-size:10.5px}
+  </style>
+  <rect class="bg" x="0" y="0" width="720" height="760"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#495057" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#e24b4a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <text class="title" x="40" y="38">Orchestrator — internal decision flow</text>
+
+  <!-- ticket in -->
+  <rect class="teal" x="270" y="60" width="180" height="42" rx="8"/>
+  <text class="h tealT" x="360" y="86" text-anchor="middle">ticket text (from queue)</text>
+
+  <!-- classify -->
+  <rect class="blue" x="270" y="130" width="180" height="46" rx="8"/>
+  <text class="h blueT" x="360" y="150" text-anchor="middle">classify (LLM)</text>
+  <text class="s blueT" x="360" y="167" text-anchor="middle">config_only / model / vague</text>
+  <line x1="360" y1="102" x2="360" y2="128" class="arr" marker-end="url(#a)"/>
+
+  <!-- needs human (vague) -->
+  <rect class="red" x="520" y="132" width="170" height="42" rx="8"/>
+  <text class="h redT" x="605" y="158" text-anchor="middle">needs_human queue</text>
+  <path d="M450 153 L518 153" class="arrR" marker-end="url(#ar)"/>
+  <text class="lblR" x="484" y="145" text-anchor="middle">vague</text>
+
+  <!-- domain gate -->
+  <rect class="gray" x="270" y="204" width="180" height="46" rx="8"/>
+  <text class="h grayT" x="360" y="224" text-anchor="middle">domain gate</text>
+  <text class="s grayT" x="360" y="241" text-anchor="middle">typo-correct (HITL) or reject</text>
+  <line x1="360" y1="176" x2="360" y2="202" class="arr" marker-end="url(#a)"/>
+
+  <!-- env gate + prod guard -->
+  <rect class="gray" x="270" y="278" width="180" height="46" rx="8"/>
+  <text class="h grayT" x="360" y="298" text-anchor="middle">environment gate</text>
+  <text class="s grayT" x="360" y="315" text-anchor="middle">typo-correct + prod guard</text>
+  <line x1="360" y1="250" x2="360" y2="276" class="arr" marker-end="url(#a)"/>
+
+  <!-- reject side -->
+  <rect class="red" x="30" y="240" width="180" height="48" rx="8"/>
+  <text class="h redT" x="120" y="259" text-anchor="middle">rejected queue</text>
+  <text class="s redT" x="120" y="276" text-anchor="middle">+ comment back to Jira</text>
+  <path d="M268 240 Q120 232 120 238" class="arrR" marker-end="url(#ar)"/>
+  <text class="lblR" x="180" y="222" text-anchor="middle">invalid domain/env</text>
+
+  <!-- split by category -->
+  <rect class="blue" x="270" y="352" width="180" height="40" rx="8"/>
+  <text class="h blueT" x="360" y="376" text-anchor="middle">dispatch by category</text>
+  <line x1="360" y1="324" x2="360" y2="350" class="arr" marker-end="url(#a)"/>
+
+  <!-- LEFT branch: config_only -->
+  <rect class="gray" x="70" y="430" width="220" height="46" rx="8"/>
+  <text class="h grayT" x="180" y="450" text-anchor="middle">extract intent fields</text>
+  <text class="s grayT" x="180" y="467" text-anchor="middle">no fabrication; ask if missing</text>
+  <path d="M300 392 L300 410 L180 410 L180 428" class="arr" marker-end="url(#a)"/>
+  <text class="lbl" x="230" y="406" text-anchor="middle">config_only</text>
+
+  <rect class="amber" x="70" y="500" width="220" height="46" rx="8"/>
+  <text class="h amberT" x="180" y="520" text-anchor="middle">missing schedule?</text>
+  <text class="s amberT" x="180" y="537" text-anchor="middle">pause → ask (resumable)</text>
+  <line x1="180" y1="476" x2="180" y2="498" class="arr" marker-end="url(#a)"/>
+
+  <rect class="teal" x="70" y="574" width="220" height="46" rx="8"/>
+  <text class="h tealT" x="180" y="594" text-anchor="middle">publish to config queue</text>
+  <text class="s tealT" x="180" y="611" text-anchor="middle">source = config_only</text>
+  <line x1="180" y1="546" x2="180" y2="572" class="arr" marker-end="url(#a)"/>
+
+  <!-- RIGHT branch: model -->
+  <rect class="blue" x="430" y="430" width="220" height="46" rx="8"/>
+  <text class="h blueT" x="540" y="450" text-anchor="middle">generate SQL + schema (LLM)</text>
+  <text class="s blueT" x="540" y="467" text-anchor="middle">SELECT-only instruction</text>
+  <path d="M420 392 L420 410 L540 410 L540 428" class="arr" marker-end="url(#a)"/>
+  <text class="lbl" x="490" y="406" text-anchor="middle">model</text>
+
+  <rect class="red" x="430" y="500" width="220" height="46" rx="8"/>
+  <text class="h redT" x="540" y="520" text-anchor="middle">SQL safety (deterministic)</text>
+  <text class="s redT" x="540" y="537" text-anchor="middle">block DROP/DELETE/… twice</text>
+  <line x1="540" y1="476" x2="540" y2="498" class="arr" marker-end="url(#a)"/>
+
+  <rect class="green" x="430" y="574" width="220" height="46" rx="8"/>
+  <text class="h greenT" x="540" y="594" text-anchor="middle">push branch + open PR</text>
+  <text class="s greenT" x="540" y="611" text-anchor="middle">Vibe Diff summary; temp workspace</text>
+  <line x1="540" y1="546" x2="540" y2="572" class="arr" marker-end="url(#a)"/>
+
+  <text class="lbl" x="360" y="660" text-anchor="middle">Every gate is deterministic; the LLM is used only for language understanding and code drafting.</text>
+  <text class="lbl" x="360" y="680" text-anchor="middle">Typo and missing-schedule prompts pause the session via ADK RequestInput and resume on answer.</text>
+</svg>
