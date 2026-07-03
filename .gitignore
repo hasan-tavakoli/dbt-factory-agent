@@ -205,6 +205,9 @@ tools/a2a-inspector/
 # Generated config.json
 config.json
 
+# Deploy-time metadata (churns on every deploy, timestamp-only diffs)
+deployment_metadata.json
+
 # Human handoff queues
 *.jsonl
 

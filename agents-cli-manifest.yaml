@@ -1,7 +1,7 @@
 name: dbt-factory-agent
 acli_version: 0.6.0
 agent_directory: app
-region: us-east1
+region: europe-west1
 base_template: adk
 generated_at: '2026-07-01T22:17:33.865388+00:00'
 language: python

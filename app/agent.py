@@ -25,7 +25,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from google.adk.agents import LlmAgent
-from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.workflow import Workflow
 from google.adk.events.event import Event
