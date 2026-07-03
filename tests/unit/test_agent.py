@@ -602,3 +602,73 @@ def test_check_sql_safety_early_unsafe():
     assert len(events) == 2
     assert "SQL safety check rejected" in events[0].content.parts[0].text
     assert events[1].actions.route == "unsafe"
+
+
+def test_reject_ticket_non_jira(monkeypatch):
+    from unittest.mock import MagicMock
+    from app.agent import reject_ticket
+
+    # Mock Pub/Sub PublisherClient
+    mock_publisher = MagicMock()
+    mock_publisher.topic_path.return_value = "projects/ht-project-500813/topics/dv-rejected-tickets"
+    mock_future = MagicMock()
+    mock_future.result.return_value = "msg-123"
+    mock_publisher.publish.return_value = mock_future
+    
+    monkeypatch.setattr("google.cloud.pubsub_v1.PublisherClient", lambda: mock_publisher)
+
+    # Mock httpx.post to make sure no HTTP call is made for non-jira user
+    mock_post = MagicMock()
+    monkeypatch.setattr("httpx.post", mock_post)
+
+    reject_ticket(
+        reason_category="unsafe_sql",
+        reason_text="DROP is not allowed",
+        ticket="Some ticket text",
+        user_id="some-user-123"
+    )
+
+    # Verify Pub/Sub was called
+    mock_publisher.publish.assert_called_once()
+    # Verify httpx.post was NOT called because user_id does not start with "jira-"
+    mock_post.assert_not_called()
+
+
+def test_reject_ticket_jira(monkeypatch):
+    from unittest.mock import MagicMock
+    from app.agent import reject_ticket
+
+    # Mock Pub/Sub PublisherClient
+    mock_publisher = MagicMock()
+    mock_publisher.topic_path.return_value = "projects/ht-project-500813/topics/dv-rejected-tickets"
+    mock_future = MagicMock()
+    mock_future.result.return_value = "msg-123"
+    mock_publisher.publish.return_value = mock_future
+    
+    monkeypatch.setattr("google.cloud.pubsub_v1.PublisherClient", lambda: mock_publisher)
+
+    # Mock httpx.post to simulate successful Jira comment (status 201)
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_post = MagicMock(return_value=mock_response)
+    monkeypatch.setattr("httpx.post", mock_post)
+
+    # Set dummy env vars for credentials
+    monkeypatch.setenv("JIRA_EMAIL", "test@test.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "dummy-token")
+    monkeypatch.setenv("JIRA_BASE_URL", "https://hassan-t.atlassian.net")
+
+    reject_ticket(
+        reason_category="invalid_domain",
+        reason_text="Unknown domain: marketing",
+        ticket="Some ticket text",
+        user_id="jira-SPORT-101"
+    )
+
+    # Verify Pub/Sub was called
+    mock_publisher.publish.assert_called_once()
+    # Verify httpx.post was called to comment on Jira
+    mock_post.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://hassan-t.atlassian.net/rest/api/3/issue/SPORT-101/comment"
+    assert kwargs["auth"] == ("test@test.com", "dummy-token")

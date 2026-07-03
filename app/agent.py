@@ -84,6 +84,87 @@ def custom_model_json_schema(*args, **kwargs):
 
 RootConfig.model_json_schema = custom_model_json_schema
 
+def reject_ticket(reason_category: str, reason_text: str, ticket: str, user_id: str) -> None:
+    """Publishes the rejection to Pub/Sub and conditionally comments on Jira if user_id starts with jira-."""
+    import json
+    import os
+    import logging
+    import httpx
+    from google.cloud import pubsub_v1
+
+    logger = logging.getLogger("dbt_factory_agent")
+    logger.info(f"reject_ticket called: category={reason_category}, user_id={user_id}, reason={reason_text}")
+
+    # 1. Publish to Pub/Sub topic "dv-rejected-tickets" in project ht-project-500813
+    project_id = "ht-project-500813"
+    topic_name = "dv-rejected-tickets"
+    try:
+        publisher = pubsub_v1.PublisherClient()
+        topic_path = publisher.topic_path(project_id, topic_name)
+        payload = {
+            "category": reason_category,
+            "reason": reason_text,
+            "ticket": ticket,
+            "user_id": user_id
+        }
+        data_str = json.dumps(payload)
+        data_bytes = data_str.encode("utf-8")
+        future = publisher.publish(topic_path, data=data_bytes)
+        msg_id = future.result()
+        logger.info(f"Published rejection payload to {topic_name}. Message ID: {msg_id}")
+    except Exception as e:
+        logger.error(f"Failed to publish rejection to Pub/Sub: {e}")
+
+    # 2. Comment back to Jira if user_id starts with "jira-"
+    if user_id and user_id.startswith("jira-"):
+        issue_key = user_id.split("jira-", 1)[1]
+        jira_base_url = os.getenv("JIRA_BASE_URL", "https://hassan-t.atlassian.net").rstrip("/")
+        jira_email = os.getenv("JIRA_EMAIL")
+        jira_api_token = os.getenv("JIRA_API_TOKEN")
+
+        if not jira_email or not jira_api_token:
+            logger.warning("Jira credentials (JIRA_EMAIL or JIRA_API_TOKEN) are missing. Skipping Jira comment.")
+            return
+
+        comment_url = f"{jira_base_url}/rest/api/3/issue/{issue_key}/comment"
+        
+        # Build ADF body
+        message_text = f"Ticket rejected.\nCategory: {reason_category}\nReason: {reason_text}"
+        body = {
+            "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": message_text
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        try:
+            logger.info(f"Posting comment to Jira issue {issue_key}...")
+            response = httpx.post(
+                comment_url,
+                json=body,
+                auth=(jira_email, jira_api_token),
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=10
+            )
+            if response.status_code == 201:
+                logger.info(f"Successfully posted rejection comment to Jira issue {issue_key}.")
+            else:
+                logger.error(f"Failed to post comment to Jira. Status: {response.status_code}, Body: {response.text}")
+        except Exception as e:
+            logger.error(f"Error while posting comment to Jira issue {issue_key}: {e}")
+
+
 # Schemas for structuring output
 class Classification(BaseModel):
     category: Literal["config_only", "model_only", "new_full", "needs_human"] = Field(
@@ -268,10 +349,19 @@ def validate_domain_typo_result(ctx: Context, node_input: dict) -> Generator[Eve
         yield Event(state={"suggested_domain": suggested_domain})
     else:
         ticket = ctx.state.get("ticket_text", "")
+        reason_text = f"Unrelated domain suggested: {node_input.get('reason', '')}"
+        
+        reject_ticket(
+            reason_category="invalid_domain",
+            reason_text=reason_text,
+            ticket=ticket,
+            user_id=ctx.user_id
+        )
+
         entry = {
             "ticket": ticket,
             "parsed_domain": ctx.state.get("domain", ""),
-            "reason": f"Unrelated domain suggested: {node_input.get('reason', '')}"
+            "reason": reason_text
         }
         
         with open("wrong_domain_queue.jsonl", "a") as f:
@@ -385,10 +475,19 @@ def validate_env_typo_result(ctx: Context, node_input: dict) -> Generator[Event,
         yield Event(state={"suggested_env": suggested_env})
     else:
         ticket = ctx.state.get("ticket_text", "")
+        reason_text = f"Unrelated environment suggested: {node_input.get('reason', '')}"
+        
+        reject_ticket(
+            reason_category="invalid_environment",
+            reason_text=reason_text,
+            ticket=ticket,
+            user_id=ctx.user_id
+        )
+
         entry = {
             "ticket": ticket,
             "parsed_env": ctx.state.get("env", ""),
-            "reason": f"Unrelated environment suggested: {node_input.get('reason', '')}"
+            "reason": reason_text
         }
         
         with open("wrong_domain_queue.jsonl", "a") as f:
@@ -888,6 +987,14 @@ def check_sql_safety_early(ctx: Context, node_input: str) -> Generator[Event, No
     # Deterministic SQL Safety Check
     is_safe, safety_reason = check_sql_safety(sql_content)
     if not is_safe:
+        ticket = ctx.state.get("ticket_text", "")
+        reject_ticket(
+            reason_category="unsafe_sql",
+            reason_text=safety_reason,
+            ticket=ticket,
+            user_id=ctx.user_id
+        )
+        
         msg = f"SQL safety check rejected the model code:\nReason: {safety_reason}"
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
         yield Event(output=msg, route="unsafe", state={"missing_critical_fields": ["SQL safety check"]})
