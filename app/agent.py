@@ -1094,7 +1094,7 @@ def validate_and_push_model(ctx: Context, node_input: Any) -> Generator[Event, N
 
     # Guard Layer 3.1: Feature branch only
     # Pushing to feature branch ensures it must go through a pull request and review,
-    # and cannot directly alter the master/staging branches.
+    # and cannot directly alter the main branch.
     feature_branch = f"feature/add-model-{model_name}-{int(time.time())}"
 
     try:
@@ -1261,7 +1261,7 @@ def create_pull_request(ctx: Context, node_input: VibeDiffSummary) -> Generator[
             f"=== PR Title ===\n"
             f"✨ feat: add dbt model {model_name}\n\n"
             f"=== PR Base/Head ===\n"
-            f"Base: staging\n"
+            f"Base: main\n"
             f"Head: {feature_branch}\n\n"
             f"=== PR Body ===\n"
             f"{pr_body}"
@@ -1281,7 +1281,7 @@ def create_pull_request(ctx: Context, node_input: VibeDiffSummary) -> Generator[
     payload = {
         "title": f"✨ feat: add dbt model {model_name}",
         "head": feature_branch,
-        "base": "staging",
+        "base": "main",
         "body": pr_body
     }
     

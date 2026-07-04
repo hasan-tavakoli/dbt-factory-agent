@@ -72,7 +72,7 @@ Everything between the two agents and the surrounding repos moves over Pub/Sub t
 
 ### The CI/CD loop
 
-For `model_only` tickets, the loop closes across repos with no manual step: the orchestrator pushes generated SQL to a feature branch and opens a PR → once a human merges it to `staging`, the dbt repo's GitHub Actions workflow builds and pushes a Docker image → on that same push, CI **re-publishes to `dv-model-image-ready` with the freshly built image reference** → `dv-config-agent` picks it up and opens a second PR against the platform config repo updating the deployed image. A ticket becomes a running pipeline change **without anyone hand-editing a deploy manifest or pasting an image tag** — the exact manual step from §1, gone.
+For `model_only` tickets, the loop closes across repos with no manual step: the orchestrator pushes generated SQL to a feature branch and opens a PR → once a human merges it to `main`, the dbt repo's GitHub Actions workflow builds and pushes a Docker image → on that same push, CI **re-publishes to `dv-model-image-ready` with the freshly built image reference** → `dv-config-agent` picks it up and opens a second PR against the platform config repo updating the deployed image. A ticket becomes a running pipeline change **without anyone hand-editing a deploy manifest or pasting an image tag** — the exact manual step from §1, gone.
 
 ### Multi-user session isolation
 
@@ -108,7 +108,7 @@ The goal is not to replace the reviewer but to **make the reviewer faster and be
   - *Two-layer SQL safety* — a deterministic (non-LLM) guard rejects any generated SQL containing `DROP`, `DELETE`, `TRUNCATE`, `ALTER`, `GRANT`, `INSERT`, `UPDATE`, or `CREATE [OR REPLACE]`, run once immediately after generation (fail fast) and again immediately before the git push (defense in depth). The LLM is *also* instructed to emit SELECT-only — so the model would have to both ignore its instructions *and* defeat a deterministic regex to do harm.
   - *Production guard* — this system only ever writes non-production config; any ticket targeting `prod`/`production`/`live` is routed straight to a human, in both agents.
   - *Anti-fabrication* — prompts explicitly forbid inventing service accounts, project IDs, or environment/domain names; missing values are asked for or the ticket is rejected, never guessed.
-  - *Git workspace isolation* — all git operations happen inside a `tempfile.TemporaryDirectory`, only ever push to a new `feature/*` branch, and land as a PR; nothing is written to `main`/`staging` directly, and the temp clone is wiped even on failure.
+  - *Git workspace isolation* — all git operations happen inside a `tempfile.TemporaryDirectory`, only ever push to a new `feature/*` branch, and land as a PR; nothing is written to `main` directly, and the temp clone is wiped even on failure.
   - *Rejection transparency* — declines are never silent; they're published for audit and, where possible, commented back to the source ticket.
 - **Agents CLI** — the project was scaffolded, evaluated, and deployed with the Agents CLI end to end (`agents-cli deploy` to Agent Runtime).
 - **Transport decision (MCP evaluated)** — an Atlassian **MCP** server was evaluated as the Jira integration point, but a Pub/Sub-backed webhook was chosen instead: it needs no long-lived connection or session state, survives agent redeploys, and keeps the Jira-facing surface to a single small, independently deployable endpoint.
@@ -127,7 +127,7 @@ A few choices were made deliberately, and are worth calling out rather than hidi
 |---|---|
 | **`dbt-factory-agent`** (this repo) | The orchestrator agent, plus the Jira webhook and Manager Dashboard services. |
 | **`dv-config-agent`** | The config-agent: turns a validated intent payload into a `config.json`/`deploy.yml` PR against the platform config repo. |
-| **`dv-sports-etl`** | A sample dbt project (models + schema). Receives `model_only` PRs from the orchestrator; its GitHub Actions workflow builds/pushes the Docker image and re-triggers the config-agent on merge to `staging`. |
+| **`dv-sports-etl`** | A sample dbt project (models + schema). Receives `model_only` PRs from the orchestrator; its GitHub Actions workflow builds/pushes the Docker image and re-triggers the config-agent on merge to `main`. |
 | **`dv-platform-config`** | The GitOps config repo — non-production dbt DAG configs organized per `<environment>/<domain>/<dag-name>/`. The target of every config-agent PR. |
 
 Two more diagrams document the internal decision flow of each agent:
