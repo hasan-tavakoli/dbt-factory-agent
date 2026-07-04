@@ -672,3 +672,109 @@ def test_reject_ticket_jira(monkeypatch):
     args, kwargs = mock_post.call_args
     assert args[0] == "https://hassan-t.atlassian.net/rest/api/3/issue/SPORT-101/comment"
     assert kwargs["auth"] == ("test@test.com", "dummy-token")
+
+
+def test_prepare_model_builder_input_stashes_intent_payload_from_model_instance():
+    from app.agent import IntentPayload
+
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"ticket_text": "Add a model", "domain": "sports"}
+
+    payload = IntentPayload(
+        service_account="sa@project.iam.gserviceaccount.com",
+        execution_project="proj-exec",
+        target_project="proj-target",
+        dag_id="dv_sports_elt",
+        schedule="0 6 * * *",
+        config_intent=None,
+    )
+
+    event = prepare_model_builder_input(ctx, payload)
+
+    assert event.actions.state_delta["model_intent_payload"] == payload.model_dump()
+
+
+def test_prepare_model_builder_input_stashes_dict_as_is():
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"ticket_text": "Add a model", "domain": "sports"}
+
+    payload_dict = {"service_account": "sa@x", "schedule": "0 6 * * *"}
+    event = prepare_model_builder_input(ctx, payload_dict)
+
+    assert event.actions.state_delta["model_intent_payload"] == payload_dict
+
+
+def test_prepare_model_builder_input_falls_back_to_empty_dict_for_unknown_shape():
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"ticket_text": "Add a model", "domain": "sports"}
+
+    event = prepare_model_builder_input(ctx, "not a payload")
+
+    assert event.actions.state_delta["model_intent_payload"] == {}
+
+
+def test_check_sql_safety_early_safe_outputs_stashed_intent_payload_not_raw_text():
+    from app.agent import check_sql_safety_early
+
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"model_intent_payload": {"service_account": "sa@x", "schedule": "0 6 * * *"}}
+
+    node_input = "Here is the SQL:\n```sql\nselect * from raw.bets;\n```"
+    events = list(check_sql_safety_early(ctx, node_input))
+
+    safe_event = events[-1]
+    assert safe_event.actions.route == "safe"
+    assert safe_event.output == {"service_account": "sa@x", "schedule": "0 6 * * *"}
+    assert not isinstance(safe_event.output, str)
+
+
+def test_model_only_handoff_wiring_carries_intent_payload_through_sql_generation():
+    """
+    Regression test for the exact production bug: check_sql_safety_early's
+    'safe' route feeds validate_config_only_payload, which requires an
+    IntentPayload-coercible value (a dict or IntentPayload instance) as
+    node_input - NOT the raw SQL/YAML markdown string model_builder produces.
+    This chains prepare_model_builder_input -> check_sql_safety_early exactly
+    as the real graph does, applying prepare_model_builder_input's state
+    delta the way the ADK engine would before check_sql_safety_early runs.
+    """
+    from app.agent import IntentPayload, check_sql_safety_early
+
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"ticket_text": "Add a model for sports", "domain": "sports"}
+
+    extracted_payload = IntentPayload(
+        service_account="sa@project.iam.gserviceaccount.com",
+        execution_project="proj-exec",
+        target_project="proj-target",
+        dag_id="dv_sports_elt",
+        schedule="0 6 * * *",
+        config_intent=None,
+    )
+
+    # Step 1: model_intent_extractor -> prepare_model_builder_input
+    prep_event = prepare_model_builder_input(ctx, extracted_payload)
+    # Simulate the ADK engine merging the state delta before the next node runs.
+    ctx.state.update(prep_event.actions.state_delta)
+
+    # Step 2: model_builder's generated text -> check_sql_safety_early
+    model_builder_output = (
+        "```sql\n-- filepath: dbt/models/public/daily_active_users.sql\n"
+        "select user_id, count(*) from raw.events group by user_id\n```\n"
+        "```yaml\n# filepath: dbt/models/public/_schema.yml\nversion: 2\n```"
+    )
+    events = list(check_sql_safety_early(ctx, model_builder_output))
+    safe_event = events[-1]
+
+    assert safe_event.actions.route == "safe"
+    # This is the exact assertion that would have failed before the fix:
+    # output used to be the raw markdown string, which crashes
+    # validate_config_only_payload's IntentPayload-typed node_input.
+    assert isinstance(safe_event.output, dict)
+    assert safe_event.output == extracted_payload.model_dump()
+
+    # Confirm it's actually coercible to IntentPayload, matching what
+    # validate_config_only_payload's type hint requires.
+    coerced = IntentPayload(**safe_event.output)
+    assert coerced.service_account == "sa@project.iam.gserviceaccount.com"
+    assert coerced.schedule == "0 6 * * *"

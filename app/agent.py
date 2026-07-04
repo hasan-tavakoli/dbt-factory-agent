@@ -965,7 +965,13 @@ model_builder = LlmAgent(
 )
 
 def prepare_model_builder_input(ctx: Context, node_input: Any) -> Event:
-    """Formats the ticket description and domain for model_builder."""
+    """Formats the ticket description and domain for model_builder.
+
+    Also stashes the IntentPayload metadata from model_intent_extractor into
+    state, since it would otherwise be lost while model_builder/
+    check_sql_safety_early operate on plain SQL text — validate_config_only_payload
+    needs it back once the SQL safety check passes.
+    """
     ticket_text = ctx.state.get("ticket_text", "")
     domain = ctx.state.get("domain", "")
     prompt = (
@@ -973,7 +979,13 @@ def prepare_model_builder_input(ctx: Context, node_input: Any) -> Event:
         f"Ticket Description: {ticket_text}\n\n"
         f"Please generate the dbt model SQL and the _schema.yml file contents according to the rules."
     )
-    return Event(output=prompt)
+    if hasattr(node_input, "model_dump"):
+        intent_payload = node_input.model_dump()
+    elif isinstance(node_input, dict):
+        intent_payload = node_input
+    else:
+        intent_payload = {}
+    return Event(output=prompt, state={"model_intent_payload": intent_payload})
 
 def check_sql_safety_early(ctx: Context, node_input: str) -> Generator[Event, None, None]:
     """Parses model_builder output, runs early SQL safety check, and routes accordingly."""
@@ -1010,7 +1022,7 @@ def check_sql_safety_early(ctx: Context, node_input: str) -> Generator[Event, No
 
     # If safe, store in state and proceed
     yield Event(
-        output=node_input,
+        output=ctx.state.get("model_intent_payload", {}),
         route="safe",
         state={"generated_text": text}
     )
