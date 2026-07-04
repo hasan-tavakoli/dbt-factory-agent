@@ -1107,7 +1107,28 @@ def validate_and_push_model(ctx: Context, node_input: Any) -> Generator[Event, N
                 raise RuntimeError(f"Git clone failed: {err}")
 
             # Create feature branch
-            subprocess.run(["git", "checkout", "-b", feature_branch], cwd=temp_dir, check=True)
+            checkout_res = subprocess.run(["git", "checkout", "-b", feature_branch], cwd=temp_dir, capture_output=True, text=True)
+            if checkout_res.returncode != 0:
+                raise RuntimeError(f"Git checkout failed: {checkout_res.stderr}")
+
+            # Guard Layer 3.2: Local git identity for this isolated clone only.
+            # The Agent Runtime container has no global git user.name/user.email,
+            # so `git commit` below would otherwise fail with "Author identity
+            # unknown" (exit code 128). Set with no --global so it only ever
+            # applies inside this throwaway temp clone, never system-wide.
+            config_email_res = subprocess.run(
+                ["git", "config", "user.email", "agent@dbt-factory-agent.local"],
+                cwd=temp_dir, capture_output=True, text=True
+            )
+            if config_email_res.returncode != 0:
+                raise RuntimeError(f"Git config user.email failed: {config_email_res.stderr}")
+
+            config_name_res = subprocess.run(
+                ["git", "config", "user.name", "dbt-factory-agent"],
+                cwd=temp_dir, capture_output=True, text=True
+            )
+            if config_name_res.returncode != 0:
+                raise RuntimeError(f"Git config user.name failed: {config_name_res.stderr}")
 
             # Write files
             # SQL model file
@@ -1130,8 +1151,16 @@ def validate_and_push_model(ctx: Context, node_input: Any) -> Generator[Event, N
                     json.dump(agent_metadata, f, indent=2)
 
             # Commit changes
-            subprocess.run(["git", "add", "."], cwd=temp_dir, check=True)
-            subprocess.run(["git", "commit", "-m", f"✨ feat: generate dbt model {model_name}"], cwd=temp_dir, check=True)
+            add_res = subprocess.run(["git", "add", "."], cwd=temp_dir, capture_output=True, text=True)
+            if add_res.returncode != 0:
+                raise RuntimeError(f"Git add failed: {add_res.stderr}")
+
+            commit_res = subprocess.run(
+                ["git", "commit", "-m", f"✨ feat: generate dbt model {model_name}"],
+                cwd=temp_dir, capture_output=True, text=True
+            )
+            if commit_res.returncode != 0:
+                raise RuntimeError(f"Git commit failed: {commit_res.stderr}")
 
             # Push changes to feature branch
             push_cmd = ["git", "push", "origin", feature_branch]

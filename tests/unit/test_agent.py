@@ -778,3 +778,82 @@ def test_model_only_handoff_wiring_carries_intent_payload_through_sql_generation
     coerced = IntentPayload(**safe_event.output)
     assert coerced.service_account == "sa@project.iam.gserviceaccount.com"
     assert coerced.schedule == "0 6 * * *"
+
+
+def test_validate_and_push_model_sets_git_identity_before_commit(monkeypatch):
+    """
+    Regression test for "Author identity unknown" (git exit code 128): the
+    Agent Runtime container has no global git user.name/user.email, so
+    `git commit` in the fresh temp clone used to fail outright. This asserts
+    the local (non-global) identity is configured, and configured strictly
+    before the commit call - not just present anywhere in the call list.
+    """
+    from unittest.mock import patch, MagicMock
+    from app.agent import validate_and_push_model
+
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    ctx = MagicMock(spec=Context)
+    ctx.state = {
+        "generated_text": (
+            "```sql\n-- filepath: dbt/models/public/daily_active_users.sql\n"
+            "select 1\n```\n"
+            "```yaml\n# filepath: dbt/models/public/_schema.yml\nversion: 2\n```"
+        ),
+        "agent_metadata": None,
+    }
+
+    success = MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", return_value=success) as mock_run:
+        events = list(validate_and_push_model(ctx, "unused"))
+
+    commands = [call.args[0] for call in mock_run.call_args_list]
+
+    email_idx = commands.index(["git", "config", "user.email", "agent@dbt-factory-agent.local"])
+    name_idx = commands.index(["git", "config", "user.name", "dbt-factory-agent"])
+    commit_idx = next(i for i, c in enumerate(commands) if c[:2] == ["git", "commit"])
+
+    assert email_idx < commit_idx
+    assert name_idx < commit_idx
+    assert events[-1].actions.route == "ok"
+
+
+def test_validate_and_push_model_surfaces_real_git_stderr_on_commit_failure(monkeypatch):
+    """
+    Git subprocess failures used to be swallowed: `check=True` without
+    `capture_output=True` means CalledProcessError.stderr is None, so the
+    real git error text never reached the logs/error message. This asserts
+    a failing `git commit` now surfaces its actual stderr.
+    """
+    from unittest.mock import patch, MagicMock
+    from app.agent import validate_and_push_model
+
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    ctx = MagicMock(spec=Context)
+    ctx.state = {
+        "generated_text": (
+            "```sql\n-- filepath: dbt/models/public/daily_active_users.sql\n"
+            "select 1\n```\n"
+        ),
+        "agent_metadata": None,
+    }
+
+    success = MagicMock(returncode=0, stdout="", stderr="")
+    commit_failure = MagicMock(
+        returncode=128,
+        stdout="",
+        stderr="Author identity unknown\n\nfatal: unable to auto-detect email address",
+    )
+
+    def run_side_effect(cmd, **kwargs):
+        if cmd[:2] == ["git", "commit"]:
+            return commit_failure
+        return success
+
+    with patch("subprocess.run", side_effect=run_side_effect):
+        events = list(validate_and_push_model(ctx, "unused"))
+
+    assert events[-1].actions.route == "needs_human"
+    assert "Author identity unknown" in events[0].content.parts[0].text
