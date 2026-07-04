@@ -33,6 +33,7 @@ from scripts.check_required_fields import parse_env_and_domain
         ("Domain: `sprot`", "sprot"),
         ('Domain: "sprot"', "sprot"),
         ("domain = sprot", "sprot"),
+        ("domain=sprot", "sprot"),
         ("Domain:sprot", "sprot"),
         ("* Domain: {{sprot}}", "sprot"),
         ("Domain: dv-sports-elt", "dv-sports-elt"),
@@ -103,6 +104,30 @@ Other information:
 * Domain: {{sprot}}
 * Environment: {{stage}}
 """
+    env, domain = parse_env_and_domain(ticket_text)
+    assert domain == "sprot"
+    assert env == "stage"
+
+
+def test_real_production_ticket_with_no_newlines_and_multiple_braces_fields() -> None:
+    # Exact text reported from production: Jira's h3./bullet wiki-markup
+    # flattened into a single line (no \n at all) with several other
+    # {{...}}-wrapped fields (DAG ID, schedule, service account, projects)
+    # appearing before the Domain/Environment fields at the very end.
+    ticket_text = (
+        "Update schedule for the sprot pipeline h3. Summary  Update the "
+        "schedule for the sprot domain ELT so it runs earlier.  h3. Context  "
+        "The change is for the sprot domain in the stage environment.  "
+        "h3. Acceptance criteria  * Update the schedule for DAG ID "
+        "{{dv_sports_elt}}. * Change the schedule to {{0 4 * * *}}. "
+        "* Use the service account "
+        "{{analytics-dev@dv-dev-eu-w1-sports-elt.iam.gserviceaccount.com}}. "
+        "* Keep the execution project as {{dv-dev-eu-w1-sports-elt}}. "
+        "* Keep the target project as {{dv-dev-eu-w1-sports-data}}.  "
+        "h3. Other information  * Domain: {{sprot}} * Environment: {{stage}}"
+    )
+    assert "\n" not in ticket_text
+
     env, domain = parse_env_and_domain(ticket_text)
     assert domain == "sprot"
     assert env == "stage"
