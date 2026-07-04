@@ -86,6 +86,19 @@ When the workflow needs an answer it can't derive (an unresolved domain/environm
 
 Every rejection (invalid domain, invalid environment, unsafe SQL) is published to `dv-rejected-tickets` for audit/analytics, and — if the ticket originated from Jira — the orchestrator also **posts a comment on the original issue** explaining exactly why it was declined, so the reporter isn't left guessing.
 
+### Reviewable by design: the "Vibe Diff"
+
+A real, under-discussed cost in data platforms is that **reviewing a change is often harder than writing it**. When code (or config) is generated for you, it's tempting to approve it without fully understanding it — and over time engineers lose touch with the structure of their own system, until even a small incident needs an AI just to explain what is running and why. That erodes, rather than builds, the team's knowledge.
+
+This system is deliberately designed to push the other way. Every change the agent proposes arrives as a pull request carrying a structured **"Vibe Diff"** written by the agent, containing:
+
+- **A plain-English summary** of what the change actually does, in the context of the project.
+- **A risk level** (low / medium / high) with a one-line reason.
+- **An intent-alignment note** — how well the generated change matches what the ticket actually asked for.
+- **A security statement** — for model PRs, an explicit confirmation that the SQL was deterministically verified to be SELECT-only.
+
+The goal is not to replace the reviewer but to **make the reviewer faster and better-informed**: the Vibe Diff explains the change, surfaces its risk up front, and shows the engineer the shape of the change rather than just a raw diff. Because a human still merges every PR, the loop *transfers* knowledge and structure to the team instead of hollowing it out — the agent does the mechanical work, while the engineer keeps ownership, context, and the final decision.
+
 ## 4. Key features / concepts demonstrated
 
 - **Multi-agent ADK system** — two separately deployable `Workflow` (graph) agents built on ADK 2.0, communicating over Pub/Sub rather than direct calls; each can be redeployed, scaled, or replaced independently.
