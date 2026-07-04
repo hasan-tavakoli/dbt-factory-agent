@@ -105,6 +105,7 @@ The goal is not to replace the reviewer but to **make the reviewer faster and be
 - **Deployability** — scaffolded and deployed with `agents-cli` to **Agent Runtime** (Vertex AI Reasoning Engine); the two supporting services (Jira webhook, Manager Dashboard) run as lightweight **Cloud Run** FastAPI apps; secrets come from **Secret Manager**, never from code.
 - **Deterministic-first, LLM-only-where-needed** — the design principle throughout: **deterministic scripts do the work; the LLM is used only where genuine reasoning is required** (understanding prose, drafting SQL, summarizing a PR). This is both a *safety* choice (deterministic checks can't be prompt-injected) and a *cost* choice — the config-agent, for example, builds config in plain code and only falls back to the LLM for the rare non-standard case, avoiding an LLM call on every run.
 - **Security, defense in depth:**
+  - *Pre-commit secret scanning* — a local `pre-commit` hook runs custom Semgrep rules that block any commit containing a hardcoded credential (Google/Gemini API keys, GitHub classic and fine-grained tokens), so secrets can't leave the workstation — a local backstop complementing the primary controls (secrets live only in a gitignored `.env` for dev and Secret Manager in deployment).
   - *Two-layer SQL safety* — a deterministic (non-LLM) guard rejects any generated SQL containing `DROP`, `DELETE`, `TRUNCATE`, `ALTER`, `GRANT`, `INSERT`, `UPDATE`, or `CREATE [OR REPLACE]`, run once immediately after generation (fail fast) and again immediately before the git push (defense in depth). The LLM is *also* instructed to emit SELECT-only — so the model would have to both ignore its instructions *and* defeat a deterministic regex to do harm.
   - *Production guard* — this system only ever writes non-production config; any ticket targeting `prod`/`production`/`live` is routed straight to a human, in both agents.
   - *Anti-fabrication* — prompts explicitly forbid inventing service accounts, project IDs, or environment/domain names; missing values are asked for or the ticket is rejected, never guessed.
@@ -166,6 +167,8 @@ uv sync
 # run the agent locally with the Agents CLI playground
 agents-cli playground
 ```
+
+Contributors: run `uv run pre-commit install` once to activate the local secret-scanning hook.
 
 The Jira webhook and Manager Dashboard are standalone FastAPI apps and can be run directly for local testing:
 
