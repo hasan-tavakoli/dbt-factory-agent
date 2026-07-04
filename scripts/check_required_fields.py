@@ -12,14 +12,41 @@ import sys
 from pathlib import Path
 
 
+# Jira markup wrappers commonly found around labels/values in ticket text:
+# {{monospace}}, *bold*, _italic_, `code`, and straight quotes.
+_MARKUP_STRIP_CHARS = "{}*_`\"' \t"
+
+
+def _extract_labeled_value(ticket_text: str, label_pattern: str) -> str | None:
+    """
+    Finds a "<label><:|=><value>" occurrence and returns the value's leading
+    token, lowercased, with surrounding markup/whitespace stripped.
+
+    The label itself may be wrapped in common Jira markup (e.g. "*Domain:*",
+    "{{Domain}}:"), and so may the value (e.g. "{{sprot}}", "*sprot*",
+    "`sprot`", '"sprot"'). Only the leading run of [A-Za-z0-9_-] characters
+    after stripping is returned, so trailing prose on the same line
+    (e.g. "sprot (typo for sports)") doesn't leak into the result.
+    """
+    pattern = rf'(?i)[*_`{{}}]*\b(?:{label_pattern})\b[*_`{{}}]*\s*[:=]\s*([^\n\r]*)'
+    match = re.search(pattern, ticket_text)
+    if not match:
+        return None
+
+    cleaned = match.group(1).strip().strip(_MARKUP_STRIP_CHARS)
+    token_match = re.match(r'[A-Za-z0-9_-]+', cleaned)
+    return token_match.group(0).lower() if token_match else None
+
+
 def parse_env_and_domain(ticket_text: str) -> tuple[str | None, str | None]:
     """
     Parses environment and domain from the ticket text.
     """
-    # 1. Match environment: "Environment: stage" or "env: dev" or keyword matching
-    env_match = re.search(r'(?i)\benv(?:ironment)?\s*[:=]\s*(\w+)', ticket_text)
-    env = env_match.group(1).lower() if env_match else None
-    
+    # 1. Match environment: "Environment: stage" or "env: dev", tolerating
+    # common Jira markup around the label/value. Falls back to a bare
+    # keyword scan across the whole text if no labeled field is found.
+    env = _extract_labeled_value(ticket_text, r'env(?:ironment)?')
+
     if not env:
         if re.search(r'(?i)\bproduction\b|\bprod\b', ticket_text):
             env = "prod"
@@ -27,11 +54,10 @@ def parse_env_and_domain(ticket_text: str) -> tuple[str | None, str | None]:
             env = "stage"
         elif re.search(r'(?i)\bdev\b', ticket_text):
             env = "dev"
-            
-    # 2. Match domain: "Domain: sports" or "domain = sports"
-    domain_match = re.search(r'(?i)\bdomain\s*[:=]\s*(\w+)', ticket_text)
-    domain = domain_match.group(1).lower() if domain_match else None
-    
+
+    # 2. Match domain: "Domain: sports" or "domain = sports", same tolerance.
+    domain = _extract_labeled_value(ticket_text, r'domain')
+
     return env, domain
 
 
