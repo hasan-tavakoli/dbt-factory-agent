@@ -253,8 +253,17 @@ classifier_agent = LlmAgent(
         "classify it into exactly one of the following categories:\n"
         "- config_only: The ticket only requests configuration changes (e.g. updating schedules, tables, metadata in JSON configs, or specifying metadata/parameters for running models without asking to create/modify SQL/Python code files).\n"
         "- model_only: The ticket requests changes to SQL/Python dbt models. Even if it contains metadata parameters like service account, projects, schedule, or config intents to accompany the model, as long as it does NOT explicitly ask to create, edit, or update separate configuration JSON/YAML files (like config.json or deploy.yml), it belongs to model_only.\n"
-        "- new_full: The ticket requests a brand new pipeline with BOTH SQL/Python models code AND explicit creation, editing, or update of separate configuration files (like config.json or deploy.yml).\n"
+        "  IMPORTANT: Providing schedule, service account, execution project, target project, or similar metadata ALONGSIDE a model request is NORMAL and EXPECTED for model_only. That metadata alone — no matter how much of it is present — must NEVER push the classification to new_full. It only describes how the model's pipeline should run; it is not a request to touch a separate config file.\n"
+        "- new_full: The ticket requests a brand new pipeline with BOTH SQL/Python model code AND an EXPLICIT, separate request to create, edit, or update a config file. The ticket must name or clearly describe a distinct config artifact (e.g. \"also create config.json\", \"add a deploy.yml entry\", \"set up the DAG's configuration file\") as something to be created/edited IN ADDITION TO the model code. Simply listing schedule/service account/project values is NOT sufficient — see model_only above.\n"
         "- needs_human: The ticket is ambiguous, lacks detail, or doesn't fit the other categories.\n\n"
+        "If you are genuinely unsure whether a ticket is model_only or new_full, choose model_only.\n\n"
+        "Examples:\n"
+        "(a) \"Add a new dbt model for the sports domain that computes daily active users. "
+        "Schedule: 0 6 * * *. Service account: analytics-dev@... Execution project: dv-dev-eu-w1-sports-elt. "
+        "Target project: dv-dev-eu-w1-sports-data.\" -> model_only. The metadata accompanies the model "
+        "request but nothing asks to create or edit a config file.\n"
+        "(b) \"Add a new dbt model for the sports domain AND create its config.json and deploy.yml.\" "
+        "-> new_full. There is an explicit, separate request to create config files in addition to the model.\n\n"
         "Jira Ticket Text:\n{ticket_text}"
     ),
     output_schema=Classification,
