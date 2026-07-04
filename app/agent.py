@@ -126,7 +126,7 @@ def reject_ticket(reason_category: str, reason_text: str, ticket: str, user_id: 
             return
 
         comment_url = f"{jira_base_url}/rest/api/3/issue/{issue_key}/comment"
-        
+
         # Build ADF body
         message_text = f"Ticket rejected.\nCategory: {reason_category}\nReason: {reason_text}"
         body = {
@@ -217,7 +217,7 @@ class IntentPayload(BaseModel):
 # Nodes logic
 def save_ticket(ctx: Context, node_input: types.Content) -> Event:
     """Extracts raw text from the input content and saves it to workflow state.
-    
+
     If a pending_schedule_payload exists in session state, the user is responding
     to a schedule prompt — short-circuit to the schedule handler instead of
     restarting the full pipeline.
@@ -225,7 +225,7 @@ def save_ticket(ctx: Context, node_input: types.Content) -> Event:
     text = ""
     if node_input and node_input.parts:
         text = "".join(part.text for part in node_input.parts if part.text)
-    
+
     # Check if we are resuming from a schedule prompt
     pending = ctx.state.get("pending_schedule_payload")
     if pending:
@@ -233,7 +233,7 @@ def save_ticket(ctx: Context, node_input: types.Content) -> Event:
             output=text,
             route="resume_schedule",
         )
-    
+
     return Event(
         output=text,
         route="normal",
@@ -308,12 +308,12 @@ def check_domain_exact(ctx: Context, node_input: Any) -> Event:
     """Extracts the domain from the ticket text and checks if it's exactly in KNOWN_DOMAINS."""
     from scripts.check_required_fields import parse_env_and_domain
     ticket_text = ctx.state.get("ticket_text", "")
-    
+
     env, domain = parse_env_and_domain(ticket_text)
-    
+
     if not domain:
         return Event(output={"domain": ""}, route="typo_check", state={"domain": ""})
-        
+
     if domain in KNOWN_DOMAINS:
         return Event(
             output=node_input,
@@ -347,7 +347,7 @@ domain_similarity_agent = LlmAgent(
 def validate_domain_typo_result(ctx: Context, node_input: dict) -> Generator[Event, None, None]:
     """Inspects the similarity agent result and either triggers RequestInput or logs wrong domain."""
     suggested_domain = node_input.get("suggested_domain", "").strip().lower()
-    
+
     if suggested_domain in KNOWN_DOMAINS:
         yield RequestInput(
             interrupt_id=f"domain_typo:{ctx.node_path}",
@@ -358,7 +358,7 @@ def validate_domain_typo_result(ctx: Context, node_input: dict) -> Generator[Eve
     else:
         ticket = ctx.state.get("ticket_text", "")
         reason_text = f"Unrelated domain suggested: {node_input.get('reason', '')}"
-        
+
         reject_ticket(
             reason_category="invalid_domain",
             reason_text=reason_text,
@@ -371,10 +371,10 @@ def validate_domain_typo_result(ctx: Context, node_input: dict) -> Generator[Eve
             "parsed_domain": ctx.state.get("domain", ""),
             "reason": reason_text
         }
-        
+
         with open("wrong_domain_queue.jsonl", "a") as f:
             f.write(json.dumps(entry) + "\n")
-            
+
         msg = f"Domain validation failed. Logged to wrong_domain_queue.jsonl. Unrelated domain name."
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
         yield Event(output=msg, route="stop")
@@ -382,12 +382,12 @@ def validate_domain_typo_result(ctx: Context, node_input: dict) -> Generator[Eve
 
 def handle_domain_confirmation(ctx: Context, node_input: Any) -> Event:
     """Handles the user's confirmation response for the domain typo.
-    
+
     Proceeds with the suggested domain on affirmatives, overrides with a valid
     known domain if the user typed it explicitly, and stops on negatives or unrecognized input.
     """
     response = str(node_input).strip().lower()
-    
+
     if response in ("yes", "y", "confirm", "true"):
         suggested = ctx.state.get("suggested_domain", "")
         return Event(
@@ -426,9 +426,9 @@ def check_env_exact(ctx: Context, node_input: Any) -> Event:
     """Extracts environment, runs production guard, checks exact match or routes to typo check."""
     from scripts.check_required_fields import parse_env_and_domain
     ticket_text = ctx.state.get("ticket_text", "")
-    
+
     env, domain = parse_env_and_domain(ticket_text)
-    
+
     if env in ("prod", "production", "live"):
         msg = "this repo holds non-production config only, so production must be handled by a human."
         return Event(
@@ -436,10 +436,10 @@ def check_env_exact(ctx: Context, node_input: Any) -> Event:
             route="prod_guard",
             state={"missing_critical_fields": ["environment (production guard)"]}
         )
-        
+
     if not env:
         return Event(output={"env": ""}, route="typo_check", state={"env": ""})
-        
+
     if env in KNOWN_ENVS:
         return Event(
             output=node_input,
@@ -473,7 +473,7 @@ env_similarity_agent = LlmAgent(
 def validate_env_typo_result(ctx: Context, node_input: dict) -> Generator[Event, None, None]:
     """Inspects the similarity agent result and either triggers RequestInput or logs wrong environment."""
     suggested_env = node_input.get("suggested_env", "").strip().lower()
-    
+
     if suggested_env in KNOWN_ENVS:
         yield RequestInput(
             interrupt_id=f"env_typo:{ctx.node_path}",
@@ -484,7 +484,7 @@ def validate_env_typo_result(ctx: Context, node_input: dict) -> Generator[Event,
     else:
         ticket = ctx.state.get("ticket_text", "")
         reason_text = f"Unrelated environment suggested: {node_input.get('reason', '')}"
-        
+
         reject_ticket(
             reason_category="invalid_environment",
             reason_text=reason_text,
@@ -497,10 +497,10 @@ def validate_env_typo_result(ctx: Context, node_input: dict) -> Generator[Event,
             "parsed_env": ctx.state.get("env", ""),
             "reason": reason_text
         }
-        
+
         with open("wrong_domain_queue.jsonl", "a") as f:
             f.write(json.dumps(entry) + "\n")
-            
+
         msg = f"Environment validation failed. Logged to wrong_domain_queue.jsonl. Unrelated environment name."
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
         yield Event(output=msg, route="stop")
@@ -509,7 +509,7 @@ def validate_env_typo_result(ctx: Context, node_input: dict) -> Generator[Event,
 def handle_env_confirmation(ctx: Context, node_input: Any) -> Event:
     """Handles the user's confirmation response for the environment typo."""
     response = str(node_input).strip().lower()
-    
+
     if response in ("yes", "y", "confirm", "true"):
         suggested = ctx.state.get("suggested_env", "")
         return Event(
@@ -532,17 +532,90 @@ def dispatch_by_category(ctx: Context, node_input: Any) -> Event:
     return Event(output=node_input, route=category)
 
 
+# Object nouns deliberately exclude "column"/"row"/"data": dropping a column or
+# removing rows/nulls from a result is normal SELECT-level data shaping, not a
+# destructive operation. Only whole table/schema/database/dataset objects count.
+_DESTRUCTIVE_OBJECT_NOUNS = r'(?:table|tables|schema|database|dataset)'
+
+
+def _detect_destructive_intent(ticket_text: str) -> str | None:
+    """
+    Deterministic scan for destructive/DDL intent in the ticket's own TEXT
+    (not generated SQL) - this is what closes the "laundering" gap where
+    model_builder silently drops a destructive request instead of acting on
+    it, and the SQL-safety check never sees anything unsafe because the
+    generated code never contained the destructive part in the first place.
+
+    Deliberately biased toward false positives over false negatives: an
+    over-flagged ticket routes to a human, a missed one silently ships the
+    wrong behavior. Note: because this matches destructive-verb-near-object
+    within a small word window, a long multi-sentence ticket that mentions
+    an unrelated table/schema elsewhere near an unrelated drop/delete/remove
+    could in rare cases bridge across a sentence boundary and false-positive
+    - an accepted trade-off for a simple, deterministic check.
+    """
+    import re
+
+    standalone_match = re.search(r'(?i)\b(truncate|wipe|purge|destroy)\b', ticket_text)
+    if standalone_match:
+        return f"contains destructive keyword '{standalone_match.group(1)}'"
+
+    if re.search(r'(?i)\balter\s+table\b', ticket_text):
+        return "requests an ALTER TABLE operation"
+
+    verb_object_pattern = (
+        rf'(?i)\b(drop|delete|remove|clear(?:\s+out)?|erase)\b(?:\s+\S+){{0,4}}\s+{_DESTRUCTIVE_OBJECT_NOUNS}\b'
+        rf'|\b{_DESTRUCTIVE_OBJECT_NOUNS}\b(?:\s+\S+){{0,4}}\s+\b(drop|delete|remove|clear(?:\s+out)?|erase)\b'
+    )
+    verb_object_match = re.search(verb_object_pattern, ticket_text)
+    if verb_object_match:
+        return f"appears to request removing a table/schema/database object: '{verb_object_match.group(0)}'"
+
+    return None
+
+
+def check_destructive_intent(ctx: Context, node_input: Any) -> Generator[Event, None, None]:
+    """
+    Deterministic pre-check for the model_only path, run BEFORE
+    model_intent_extractor/model_builder: if the ticket text itself
+    expresses destructive/DDL intent, reject it here rather than letting
+    model_builder silently rewrite it into a harmless SELECT. If
+    model_builder never receives the ticket, it can't launder it, and
+    pr_summarizer never gets a chance to falsely claim intent alignment.
+    """
+    ticket_text = ctx.state.get("ticket_text", "")
+    reason = _detect_destructive_intent(ticket_text)
+
+    if reason:
+        msg = (
+            f"This ticket requests a destructive operation ({reason}), which this "
+            "agent will not perform automatically; please handle via a reviewed "
+            "manual process."
+        )
+        reject_ticket(
+            reason_category="destructive_intent",
+            reason_text=reason,
+            ticket=ticket_text,
+            user_id=ctx.user_id
+        )
+        yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
+        yield Event(output=msg, route="unsafe_intent", state={"missing_critical_fields": ["destructive intent detected"]})
+        return
+
+    yield Event(output=node_input, route="ok")
+
+
 def check_critical_fields(ctx: Context, node_input: dict) -> Event:
     """Checks for critical identity/security fields and environment/domain settings."""
     from scripts.check_required_fields import check_config_and_env
     ticket_text = ctx.state.get("ticket_text", "")
     resolved_domain = ctx.state.get("domain")
     resolved_env = ctx.state.get("environment")
-    
+
     res = check_config_and_env(node_input, ticket_text, resolved_domain, resolved_env)
     missing = res["missing_fields"]
     is_prod = res["is_prod"]
-    
+
     if missing:
         msg = f"Critical fields/metadata are missing: {', '.join(missing)}"
         return Event(
@@ -630,7 +703,7 @@ def handle_config_only(node_input: dict) -> Generator[Event, None, None]:
     filename = "config.json"
     with open(filename, "w") as f:
         json.dump(node_input, f, indent=2)
-    
+
     msg = f"Successfully generated dbt DAG config in `{filename}`:\n```json\n{json.dumps(node_input, indent=2)}\n```"
     yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
     yield Event(output=node_input)
@@ -640,7 +713,7 @@ def publish_config_only_payload(ctx: Context, node_input: Any) -> Generator[Even
     """
     Publishes the config_only payload to Pub/Sub topic 'dv-model-image-ready'
     in project 'ht-project-500813'.
-    
+
     The payload is wrapped in the streamQuery envelope required by the config-agent:
     {
       "class_method": "stream_query",
@@ -656,7 +729,7 @@ def publish_config_only_payload(ctx: Context, node_input: Any) -> Generator[Even
     from google.genai import types
 
     payload_str = str(node_input)
-    
+
     # Wrap in the stream_query envelope matching what the CI/CD pipeline does
     envelope = {
         "class_method": "stream_query",
@@ -665,31 +738,31 @@ def publish_config_only_payload(ctx: Context, node_input: Any) -> Generator[Even
             "user_id": "orchestrator"
         }
     }
-    
+
     project_id = "ht-project-500813"
     topic_name = "dv-model-image-ready"
-    
+
     msg = f"Publishing config_only event to Pub/Sub topic '{topic_name}' in project '{project_id}'..."
     yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
-    
+
     try:
         publisher = pubsub_v1.PublisherClient()
         topic_path = publisher.topic_path(project_id, topic_name)
-        
+
         envelope_str = json.dumps(envelope)
         data_bytes = envelope_str.encode("utf-8")
-        
+
         # Publish synchronously (wait for the future)
         future = publisher.publish(topic_path, data=data_bytes)
         message_id = future.result()
-        
+
         success_msg = (
             f"Config change queued (Pub/Sub Message ID: {message_id}) — "
             "the config-agent will open a PR shortly."
         )
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=success_msg)]))
         yield Event(output=success_msg)
-        
+
     except Exception as e:
         err_msg = f"Failed to publish config_only event to Pub/Sub: {e}"
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=err_msg)]))
@@ -727,7 +800,7 @@ model_intent_extractor = LlmAgent(
 def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Generator[Event, None, None]:
     """
     Validates completeness of the extracted payload for config_only / model_only category.
-    
+
     Key logic:
     1. Derive dag_id from domain if empty (pattern: dv_<domain>_elt).
     2. Check if the DAG already exists in the config repo (standalone path check).
@@ -736,12 +809,12 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
     3. Never invent schedule, service accounts, or projects — read from config or ask.
     """
     from scripts.check_required_fields import check_config, resolve_target_path
-    
+
     ticket_text = ctx.state.get("ticket_text", "")
     resolved_domain = ctx.state.get("domain")
     resolved_env = ctx.state.get("environment")
     category = ctx.state.get("ticket_category")
-    
+
     # Get values from IntentPayload
     service_account = getattr(node_input, "service_account", "") or ""
     execution_project = getattr(node_input, "execution_project", "") or ""
@@ -749,11 +822,11 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
     dag_id = getattr(node_input, "dag_id", "") or ""
     schedule = getattr(node_input, "schedule", "") or ""
     config_intent = getattr(node_input, "config_intent", "") or ""
-    
+
     # ── Step 1: Derive dag_id if empty ──────────────────────────────────────
     if not dag_id.strip() and resolved_domain:
         dag_id = f"dv_{resolved_domain}_elt"
-        
+
     # ── Step 2: Standalone path-exists check ────────────────────────────────
     # This runs independently of the missing-fields check so we always know
     # whether we're adding to an existing DAG or creating a new one.
@@ -767,7 +840,7 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
                 )
             except ValueError:
                 pass  # unsupported environment — will be caught later
-    
+
     # ── Step 3: Check identity/security fields ──────────────────────────────
     missing = []
     if not service_account.strip():
@@ -776,7 +849,7 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
         missing.append("execution_project")
     if not target_project.strip():
         missing.append("target_project")
-        
+
     # Category-specific field requirements
     if category == "model_only":
         # model_only requires at least one of: dag_id OR domain
@@ -788,7 +861,7 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
         # config_only requires dag_id explicitly
         if not dag_id.strip():
             missing.append("dag_id")
-            
+
     # ── Step 4: Schedule requirement ────────────────────────────────────────
     # If DAG exists → schedule comes from existing config, don't require it.
     # If DAG is new → schedule is required.
@@ -824,10 +897,10 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
                     state={"pending_schedule_payload": pending_payload}
                 )
                 return
-    
+
     # ── Step 5: Prod guard ──────────────────────────────────────────────────
     is_prod = resolved_env in ("prod", "production")
-    
+
     if missing:
         msg = f"Critical fields/metadata are missing: {', '.join(missing)}"
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
@@ -837,7 +910,7 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
             state={"missing_critical_fields": missing}
         )
         return
-        
+
     if is_prod:
         msg = "this repo holds non-production config only, so production must be handled by a human."
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
@@ -847,7 +920,7 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
             state={"missing_critical_fields": ["environment (production guard)"]}
         )
         return
-        
+
     # ── Step 6: Assemble payload ────────────────────────────────────────────
     payload = {
         "source": "model" if category == "model_only" else "config_only",
@@ -860,7 +933,7 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
         "target_project": target_project,
         "config_intent": config_intent
     }
-    
+
     import json
     if category == "model_only":
         log_msg = f"Extracted metadata for model PR:\n```json\n{json.dumps(payload, indent=2)}\n```"
@@ -881,7 +954,7 @@ def validate_config_only_payload(ctx: Context, node_input: IntentPayload) -> Gen
 
 def stop_for_user_input(node_input: Any) -> Event:
     """Terminal node — halts the workflow so the user can respond.
-    
+
     The workflow stops here. When the user sends their next message,
     save_ticket detects pending_schedule_payload in session state and
     routes directly to handle_schedule_response.
@@ -891,17 +964,17 @@ def stop_for_user_input(node_input: Any) -> Event:
 
 def handle_schedule_response(ctx: Context, node_input: Any) -> Event:
     """Processes the user's schedule response and resumes the workflow.
-    
+
     Called when save_ticket detects pending_schedule_payload in session state.
     The user's response (a cron expression) arrives as the node_input string.
     After assembling the payload, clear pending_schedule_payload so future
     messages go through the normal pipeline.
     """
     response_schedule = str(node_input).strip()
-    
+
     pending = ctx.state.get("pending_schedule_payload", {})
     category = pending.get("category")
-    
+
     # Assemble payload with the user-provided schedule
     payload = {
         "source": "model" if category == "model_only" else "config_only",
@@ -914,7 +987,7 @@ def handle_schedule_response(ctx: Context, node_input: Any) -> Event:
         "target_project": pending.get("target_project"),
         "config_intent": pending.get("config_intent")
     }
-    
+
     import json
     if category == "model_only":
         log_msg = f"Extracted metadata for model PR:\n```json\n{json.dumps(payload, indent=2)}\n```"
@@ -960,6 +1033,7 @@ model_builder = LlmAgent(
         "...\n"
         "```\n"
         "- You must only generate SELECT queries. Never generate any write operations like DROP, DELETE, TRUNCATE, ALTER, GRANT, INSERT, UPDATE, or CREATE OR REPLACE.\n"
+        "- If the ticket asks for a destructive/DDL operation, do NOT silently drop that part of the request and generate an unrelated SELECT instead. Output a SQL comment block stating plainly that this request requires a destructive operation this agent will not perform automatically, and do not fabricate an unrelated model in its place.\n"
         "- Do not execute any code, shell commands, or make network calls."
     )
 )
@@ -1014,7 +1088,7 @@ def check_sql_safety_early(ctx: Context, node_input: str) -> Generator[Event, No
             ticket=ticket,
             user_id=ctx.user_id
         )
-        
+
         msg = f"SQL safety check rejected the model code:\nReason: {safety_reason}"
         yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
         yield Event(output=msg, route="unsafe", state={"missing_critical_fields": ["SQL safety check"]})
@@ -1194,7 +1268,7 @@ def prepare_pr_summarizer_input(ctx: Context, node_input: Any) -> Event:
     ticket_text = ctx.state.get("ticket_text", "")
     sql = ctx.state.get("generated_sql", "")
     yaml = ctx.state.get("generated_yaml", "")
-    
+
     prompt = (
         f"Original Ticket:\n{ticket_text}\n\n"
         f"Generated dbt SQL Model:\n```sql\n{sql}\n```\n\n"
@@ -1224,17 +1298,17 @@ def create_pull_request(ctx: Context, node_input: VibeDiffSummary) -> Generator[
     import json
     import urllib.request
     import urllib.error
-    
+
     plain_summary = getattr(node_input, "plain_summary", "")
     risk_level = getattr(node_input, "risk_level", "low")
     risk_reason = getattr(node_input, "risk_reason", "")
     intent_alignment = getattr(node_input, "intent_alignment", "")
-    
+
     model_name = ctx.state.get("model_name", "new_model")
     feature_branch = ctx.state.get("feature_branch", "")
     sql = ctx.state.get("generated_sql", "")
     yaml = ctx.state.get("generated_yaml", "")
-    
+
     # Build PR Body in Markdown format
     pr_body = (
         f"## Summary\n"
@@ -1253,7 +1327,7 @@ def create_pull_request(ctx: Context, node_input: VibeDiffSummary) -> Generator[
         f"### `dbt/models/public/_schema.yml`\n"
         f"```yaml\n{yaml}\n```"
     )
-    
+
     github_token = os.getenv("GITHUB_TOKEN")
     if not github_token:
         msg = (
@@ -1284,19 +1358,19 @@ def create_pull_request(ctx: Context, node_input: VibeDiffSummary) -> Generator[
         "base": "main",
         "body": pr_body
     }
-    
+
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
         headers=headers,
         method="POST"
     )
-    
+
     try:
         with urllib.request.urlopen(req) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             pr_url = res_data.get("html_url", "")
-            
+
             msg = (
                 f"Successfully created Pull Request:\n"
                 f"PR URL: {pr_url}\n\n"
@@ -1306,7 +1380,7 @@ def create_pull_request(ctx: Context, node_input: VibeDiffSummary) -> Generator[
             )
             yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
             yield Event(output={"pr_url": pr_url, "pr_body": pr_body})
-            
+
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode("utf-8")
         msg = f"Failed to create GitHub Pull Request. HTTP Error: {e.code}. Details: {err_msg}"
@@ -1328,16 +1402,16 @@ def handle_needs_human(ctx: Context, node_input: Any) -> Generator[Event, None, 
     """Appends the ticket and missing fields to a local queue and yields message."""
     ticket = ctx.state.get("ticket_text", "")
     missing_fields = ctx.state.get("missing_critical_fields", [])
-    
+
     entry = {
         "ticket": ticket,
         "missing_critical_fields": missing_fields,
         "reason": str(node_input)
     }
-    
+
     with open("needs_human_queue.jsonl", "a") as f:
         f.write(json.dumps(entry) + "\n")
-        
+
     msg = f"Ticket routed to human review. Logged to needs_human_queue.jsonl. Reason: {node_input}"
     yield Event(content=types.Content(role='model', parts=[types.Part.from_text(text=msg)]))
     yield Event(output=entry)
@@ -1386,8 +1460,12 @@ root_agent = Workflow(
         }),
         (dispatch_by_category, {
             'config_only': intent_extractor,
-            'model_only': model_intent_extractor,
+            'model_only': check_destructive_intent,
             'new_full': handle_new_full,
+        }),
+        (check_destructive_intent, {
+            'ok': model_intent_extractor,
+            'unsafe_intent': handle_needs_human,
         }),
         (intent_extractor, validate_config_only_payload),
         (model_intent_extractor, prepare_model_builder_input),

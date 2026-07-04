@@ -30,14 +30,14 @@ from app.agent import (
 def test_save_ticket():
     ctx = MagicMock(spec=Context)
     ctx.state = {}
-    
+
     input_content = types.Content(
         role="user",
         parts=[types.Part.from_text(text="Please create a dbt configuration.")]
     )
-    
+
     event = save_ticket(ctx, input_content)
-    
+
     assert event.output == "Please create a dbt configuration."
     assert event.actions.state_delta["ticket_text"] == "Please create a dbt configuration."
 
@@ -47,7 +47,7 @@ def test_route_ticket():
     ctx = MagicMock(spec=Context)
     classification_data = {"category": "config_only", "reason": "Only requests a config"}
     event = route_ticket(ctx, classification_data)
-    
+
     assert event.output == classification_data
     assert event.actions.route == "ok"
 
@@ -64,23 +64,23 @@ def test_handle_config_only(tmp_path):
             "owner": "team@company.com",
             "description": "Test DAG"
         }
-        
+
         events = list(handle_config_only(config_data))
-        
+
         assert len(events) == 2
-        
+
         content_event = events[0]
         assert content_event.content is not None
         assert "Successfully generated dbt DAG config" in content_event.content.parts[0].text
-        
+
         output_event = events[1]
         assert output_event.output == config_data
-        
+
         assert os.path.exists("config.json")
         with open("config.json") as f:
             written_data = json.load(f)
         assert written_data == config_data
-        
+
     finally:
         os.chdir(old_cwd)
 
@@ -94,24 +94,24 @@ def test_prepare_model_builder_input():
 
 def test_check_sql_safety():
     from scripts.check_sql_safety import check_sql_safety
-    
+
     # Safe queries
     is_safe, reason = check_sql_safety("SELECT * FROM raw.games")
     assert is_safe
     assert reason is None
-    
+
     is_safe, reason = check_sql_safety("with daily_stats as (select * from games) select * from daily_stats")
     assert is_safe
-    
+
     # Dangerous queries
     is_safe, reason = check_sql_safety("DROP TABLE raw.games")
     assert not is_safe
     assert "DROP" in reason
-    
+
     is_safe, reason = check_sql_safety("DELETE FROM raw.games WHERE id = 1")
     assert not is_safe
     assert "DELETE" in reason
-    
+
     is_safe, reason = check_sql_safety("CREATE OR REPLACE TABLE raw.games AS SELECT * FROM raw.old_games")
     assert not is_safe
     assert "CREATE/REPLACE" in reason
@@ -121,13 +121,13 @@ def test_validate_config_success(tmp_path):
     from unittest.mock import patch, MagicMock
     from app.agent import validate_config
     import subprocess
-    
+
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         ctx = MagicMock(spec=Context)
         ctx.state = {"validation_attempts": 0}
-        
+
         node_input = {
             "dag_configs": [
                 {
@@ -136,20 +136,20 @@ def test_validate_config_success(tmp_path):
                 }
             ]
         }
-        
+
         mock_res = MagicMock()
         mock_res.returncode = 0
         mock_res.stdout = "OK    my_dag in dv-dev-eu"
         mock_res.stderr = ""
-        
+
         with patch("subprocess.run", return_value=mock_res) as mock_run:
             events = list(validate_config(ctx, node_input))
-            
+
             assert len(events) == 2
             assert "Successfully generated and validated" in events[0].content.parts[0].text
             assert events[1].actions.route == "valid"
             assert events[1].output == node_input
-            
+
             assert os.path.exists("config.json")
             mock_run.assert_called_once()
     finally:
@@ -159,28 +159,28 @@ def test_validate_config_success(tmp_path):
 def test_validate_config_failure_retry(tmp_path):
     from unittest.mock import patch, MagicMock
     from app.agent import validate_config
-    
+
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         ctx = MagicMock(spec=Context)
         ctx.state = {"validation_attempts": 0}
-        
+
         node_input = {"test": "data"}
-        
+
         mock_res = MagicMock()
         mock_res.returncode = 1
         mock_res.stdout = "  - [dag_configs -> 0 -> job_config -> steps] Field required"
         mock_res.stderr = "Validation failed. Fix the fields listed above."
-        
+
         with patch("subprocess.run", return_value=mock_res) as mock_run:
             events = list(validate_config(ctx, node_input))
-            
+
             assert len(events) == 1
             assert events[0].actions.route == "retry"
             assert events[0].actions.state_delta["validation_attempts"] == 1
             assert "Field required" in events[0].actions.state_delta["validation_feedback"]
-            
+
             assert os.path.exists("config.json")
             mock_run.assert_called_once()
     finally:
@@ -190,27 +190,27 @@ def test_validate_config_failure_retry(tmp_path):
 def test_validate_config_failure_max_attempts(tmp_path):
     from unittest.mock import patch, MagicMock
     from app.agent import validate_config
-    
+
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         ctx = MagicMock(spec=Context)
         ctx.state = {"validation_attempts": 3}  # 3 attempts already made, this is the 4th
-        
+
         node_input = {"test": "data"}
-        
+
         mock_res = MagicMock()
         mock_res.returncode = 1
         mock_res.stdout = "  - [dag_configs -> 0 -> job_config -> steps] Field required"
         mock_res.stderr = "Validation failed. Fix the fields listed above."
-        
+
         with patch("subprocess.run", return_value=mock_res) as mock_run:
             events = list(validate_config(ctx, node_input))
-            
+
             assert len(events) == 2
             assert "Validation failed after 4 attempts" in events[0].content.parts[0].text
             assert events[1].actions.route == "needs_human"
-            
+
             assert os.path.exists("config.json")
             mock_run.assert_called_once()
     finally:
@@ -220,7 +220,7 @@ def test_validate_config_failure_max_attempts(tmp_path):
 def test_check_critical_fields_success():
     from unittest.mock import MagicMock
     from app.agent import check_critical_fields
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "Domain: sports, Environment: stage"}
     node_input = {
@@ -240,7 +240,7 @@ def test_check_critical_fields_success():
             }
         ]
     }
-    
+
     event = check_critical_fields(ctx, node_input)
     assert event.actions.route == "ok"
     assert "Resolved target path: dv-platform-config/dv-stage-eu/sports/my-dag/config.json" in event.content.parts[0].text
@@ -250,7 +250,7 @@ def test_check_critical_fields_success():
 def test_check_critical_fields_missing():
     from unittest.mock import MagicMock
     from app.agent import check_critical_fields
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "Domain: sports, Environment: stage"}
     # Missing DBT_IMPERSONATE_SERVICE_ACCOUNT
@@ -270,7 +270,7 @@ def test_check_critical_fields_missing():
             }
         ]
     }
-    
+
     event = check_critical_fields(ctx, node_input)
     assert event.actions.route == "needs_human"
     assert "Critical fields/metadata are missing" in event.output
@@ -280,7 +280,7 @@ def test_check_critical_fields_missing():
 def test_check_critical_fields_missing_env():
     from unittest.mock import MagicMock
     from app.agent import check_critical_fields
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "DAG id my_dag..."}
     node_input = {
@@ -300,7 +300,7 @@ def test_check_critical_fields_missing_env():
             }
         ]
     }
-    
+
     event = check_critical_fields(ctx, node_input)
     assert event.actions.route == "needs_human"
     assert "environment" in event.output
@@ -310,7 +310,7 @@ def test_check_critical_fields_missing_env():
 def test_check_critical_fields_prod_guard():
     from unittest.mock import MagicMock
     from app.agent import check_critical_fields
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "Domain: sports, Environment: prod"}
     node_input = {
@@ -330,7 +330,7 @@ def test_check_critical_fields_prod_guard():
             }
         ]
     }
-    
+
     event = check_critical_fields(ctx, node_input)
     assert event.actions.route == "needs_human"
     assert "production must be handled by a human" in event.output
@@ -340,7 +340,7 @@ def test_handle_needs_human(tmp_path):
     from unittest.mock import MagicMock
     from app.agent import handle_needs_human
     import json
-    
+
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
@@ -349,12 +349,12 @@ def test_handle_needs_human(tmp_path):
             "ticket_text": "Domain: sports...",
             "missing_critical_fields": ["DBT_IMPERSONATE_SERVICE_ACCOUNT"]
         }
-        
+
         events = list(handle_needs_human(ctx, "Some validation error"))
-        
+
         assert len(events) == 2
         assert "Ticket routed to human review" in events[0].content.parts[0].text
-        
+
         # Verify JSONL log file is created
         assert os.path.exists("needs_human_queue.jsonl")
         with open("needs_human_queue.jsonl", "r") as f:
@@ -371,10 +371,10 @@ def test_handle_needs_human(tmp_path):
 def test_check_domain_exact_success():
     from unittest.mock import MagicMock
     from app.agent import check_domain_exact
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "Domain: sports, Environment: stage"}
-    
+
     event = check_domain_exact(ctx, "input_data")
     assert event.actions.route == "ok"
     assert event.actions.state_delta["domain"] == "sports"
@@ -384,10 +384,10 @@ def test_check_domain_exact_success():
 def test_check_domain_exact_failure():
     from unittest.mock import MagicMock
     from app.agent import check_domain_exact
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "Domain: sprot, Environment: stage"}
-    
+
     event = check_domain_exact(ctx, "input_data")
     assert event.actions.route == "typo_check"
     assert event.output == {"domain": "sprot"}
@@ -397,11 +397,11 @@ def test_validate_domain_typo_result_success():
     from unittest.mock import MagicMock
     from app.agent import validate_domain_typo_result
     from google.adk.events.request_input import RequestInput
-    
+
     ctx = MagicMock(spec=Context)
     ctx.node_path = "path"
     node_input = {"suggested_domain": "sports", "reason": "Close to sprot"}
-    
+
     events = list(validate_domain_typo_result(ctx, node_input))
     assert len(events) == 2
     assert isinstance(events[0], RequestInput)
@@ -412,19 +412,19 @@ def test_validate_domain_typo_result_success():
 def test_validate_domain_typo_result_unrelated(tmp_path):
     from unittest.mock import MagicMock
     from app.agent import validate_domain_typo_result
-    
+
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         ctx = MagicMock(spec=Context)
         ctx.state = {"ticket_text": "Domain: banana..."}
         node_input = {"suggested_domain": "", "reason": "Not related"}
-        
+
         events = list(validate_domain_typo_result(ctx, node_input))
         assert len(events) == 2
         assert "Domain validation failed" in events[0].content.parts[0].text
         assert events[1].actions.route == "stop"
-        
+
         # Verify JSONL log file is created
         assert os.path.exists("wrong_domain_queue.jsonl")
     finally:
@@ -434,10 +434,10 @@ def test_validate_domain_typo_result_unrelated(tmp_path):
 def test_handle_domain_confirmation_yes():
     from unittest.mock import MagicMock
     from app.agent import handle_domain_confirmation
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"suggested_domain": "sports"}
-    
+
     event = handle_domain_confirmation(ctx, "yes")
     assert event.actions.route == "ok"
     assert event.actions.state_delta["domain"] == "sports"
@@ -446,10 +446,10 @@ def test_handle_domain_confirmation_yes():
 def test_handle_domain_confirmation_no():
     from unittest.mock import MagicMock
     from app.agent import handle_domain_confirmation
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"suggested_domain": "sports"}
-    
+
     event = handle_domain_confirmation(ctx, "no")
     assert event.actions.route == "stop"
     assert "User declined" in event.content.parts[0].text
@@ -458,10 +458,10 @@ def test_handle_domain_confirmation_no():
 def test_handle_domain_confirmation_override():
     from unittest.mock import MagicMock
     from app.agent import handle_domain_confirmation
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"suggested_domain": "sports"}
-    
+
     event = handle_domain_confirmation(ctx, "wallet")
     assert event.actions.route == "ok"
     assert event.actions.state_delta["domain"] == "wallet"
@@ -471,10 +471,10 @@ def test_handle_domain_confirmation_override():
 def test_handle_domain_confirmation_unrecognized():
     from unittest.mock import MagicMock
     from app.agent import handle_domain_confirmation
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"suggested_domain": "sports"}
-    
+
     event = handle_domain_confirmation(ctx, "banana")
     assert event.actions.route == "stop"
     assert "Unrecognized domain response" in event.content.parts[0].text
@@ -483,10 +483,10 @@ def test_handle_domain_confirmation_unrecognized():
 def test_check_env_exact_success():
     from unittest.mock import MagicMock
     from app.agent import check_env_exact
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "Domain: sports, Environment: stage"}
-    
+
     event = check_env_exact(ctx, "input_data")
     assert event.actions.route == "ok"
     assert event.actions.state_delta["environment"] == "stage"
@@ -496,10 +496,10 @@ def test_check_env_exact_success():
 def test_check_env_exact_failure():
     from unittest.mock import MagicMock
     from app.agent import check_env_exact
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "Domain: sports, Environment: stag"}
-    
+
     event = check_env_exact(ctx, "input_data")
     assert event.actions.route == "typo_check"
     assert event.output == {"env": "stag"}
@@ -508,10 +508,10 @@ def test_check_env_exact_failure():
 def test_check_env_exact_prod():
     from unittest.mock import MagicMock
     from app.agent import check_env_exact
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"ticket_text": "Domain: sports, Environment: prod"}
-    
+
     event = check_env_exact(ctx, "input_data")
     assert event.actions.route == "prod_guard"
     assert "production must be handled by a human" in event.output
@@ -521,11 +521,11 @@ def test_validate_env_typo_result_success():
     from unittest.mock import MagicMock
     from app.agent import validate_env_typo_result
     from google.adk.events.request_input import RequestInput
-    
+
     ctx = MagicMock(spec=Context)
     ctx.node_path = "path"
     node_input = {"suggested_env": "stage", "reason": "Close to stag"}
-    
+
     events = list(validate_env_typo_result(ctx, node_input))
     assert len(events) == 2
     assert isinstance(events[0], RequestInput)
@@ -536,19 +536,19 @@ def test_validate_env_typo_result_success():
 def test_validate_env_typo_result_unrelated(tmp_path):
     from unittest.mock import MagicMock
     from app.agent import validate_env_typo_result
-    
+
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         ctx = MagicMock(spec=Context)
         ctx.state = {"ticket_text": "Environment: xyz..."}
         node_input = {"suggested_env": "", "reason": "Not related"}
-        
+
         events = list(validate_env_typo_result(ctx, node_input))
         assert len(events) == 2
         assert "Environment validation failed" in events[0].content.parts[0].text
         assert events[1].actions.route == "stop"
-        
+
         assert os.path.exists("wrong_domain_queue.jsonl")
     finally:
         os.chdir(old_cwd)
@@ -557,10 +557,10 @@ def test_validate_env_typo_result_unrelated(tmp_path):
 def test_handle_env_confirmation_yes():
     from unittest.mock import MagicMock
     from app.agent import handle_env_confirmation
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"suggested_env": "stage"}
-    
+
     event = handle_env_confirmation(ctx, "yes")
     assert event.actions.route == "ok"
     assert event.actions.state_delta["environment"] == "stage"
@@ -569,10 +569,10 @@ def test_handle_env_confirmation_yes():
 def test_handle_env_confirmation_no():
     from unittest.mock import MagicMock
     from app.agent import handle_env_confirmation
-    
+
     ctx = MagicMock(spec=Context)
     ctx.state = {"suggested_env": "stage"}
-    
+
     event = handle_env_confirmation(ctx, "no")
     assert event.actions.route == "stop"
     assert "User declined" in event.content.parts[0].text
@@ -581,10 +581,10 @@ def test_handle_env_confirmation_no():
 def test_check_sql_safety_early_safe():
     from unittest.mock import MagicMock
     from app.agent import check_sql_safety_early
-    
+
     ctx = MagicMock(spec=Context)
     node_input = "Here is the SQL:\n```sql\nselect * from raw.bets;\n```"
-    
+
     events = list(check_sql_safety_early(ctx, node_input))
     assert len(events) == 1
     assert events[0].actions.route == "safe"
@@ -594,10 +594,10 @@ def test_check_sql_safety_early_safe():
 def test_check_sql_safety_early_unsafe():
     from unittest.mock import MagicMock
     from app.agent import check_sql_safety_early
-    
+
     ctx = MagicMock(spec=Context)
     node_input = "Here is the SQL:\n```sql\ndrop table raw.bets;\n```"
-    
+
     events = list(check_sql_safety_early(ctx, node_input))
     assert len(events) == 2
     assert "SQL safety check rejected" in events[0].content.parts[0].text
@@ -614,7 +614,7 @@ def test_reject_ticket_non_jira(monkeypatch):
     mock_future = MagicMock()
     mock_future.result.return_value = "msg-123"
     mock_publisher.publish.return_value = mock_future
-    
+
     monkeypatch.setattr("google.cloud.pubsub_v1.PublisherClient", lambda: mock_publisher)
 
     # Mock httpx.post to make sure no HTTP call is made for non-jira user
@@ -644,7 +644,7 @@ def test_reject_ticket_jira(monkeypatch):
     mock_future = MagicMock()
     mock_future.result.return_value = "msg-123"
     mock_publisher.publish.return_value = mock_future
-    
+
     monkeypatch.setattr("google.cloud.pubsub_v1.PublisherClient", lambda: mock_publisher)
 
     # Mock httpx.post to simulate successful Jira comment (status 201)
@@ -857,3 +857,84 @@ def test_validate_and_push_model_surfaces_real_git_stderr_on_commit_failure(monk
 
     assert events[-1].actions.route == "needs_human"
     assert "Author identity unknown" in events[0].content.parts[0].text
+
+
+def test_detect_destructive_intent_positives():
+    from app.agent import _detect_destructive_intent
+
+    positive_tickets = [
+        "drop the old staging table",
+        "truncate the table",
+        "delete the sports table",
+        "remove the schema",
+        "alter table dv_sports_elt add column foo",
+        "wipe the dataset",
+    ]
+    for ticket in positive_tickets:
+        assert _detect_destructive_intent(ticket) is not None, (
+            f"expected destructive intent to be flagged for: {ticket!r}"
+        )
+
+
+def test_detect_destructive_intent_negatives():
+    from app.agent import _detect_destructive_intent
+
+    negative_tickets = [
+        "drop duplicate rows",
+        "remove unused columns",
+        "delete null values from the result",
+        "add a daily active users model",
+    ]
+    for ticket in negative_tickets:
+        assert _detect_destructive_intent(ticket) is None, (
+            f"did not expect destructive intent to be flagged for: {ticket!r}"
+        )
+
+
+def test_check_destructive_intent_routes_destructive_ticket_to_unsafe_intent_and_comments_on_jira(monkeypatch):
+    from app.agent import check_destructive_intent
+
+    # Mock Pub/Sub PublisherClient - reject_ticket() must publish to dv-rejected-tickets.
+    mock_publisher = MagicMock()
+    mock_publisher.topic_path.return_value = "projects/ht-project-500813/topics/dv-rejected-tickets"
+    mock_future = MagicMock()
+    mock_future.result.return_value = "msg-123"
+    mock_publisher.publish.return_value = mock_future
+    monkeypatch.setattr("google.cloud.pubsub_v1.PublisherClient", lambda: mock_publisher)
+
+    # Mock httpx.post - reject_ticket() must also comment back on the Jira issue.
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_post = MagicMock(return_value=mock_response)
+    monkeypatch.setattr("httpx.post", mock_post)
+    monkeypatch.setenv("JIRA_EMAIL", "test@test.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "dummy-token")
+    monkeypatch.setenv("JIRA_BASE_URL", "https://hassan-t.atlassian.net")
+
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"ticket_text": "drop the old staging table before rebuilding"}
+    ctx.user_id = "jira-SPORT-777"
+
+    events = list(check_destructive_intent(ctx, {}))
+
+    assert events[-1].actions.route == "unsafe_intent"
+    assert "destructive operation" in events[-1].output
+    assert "reviewed manual process" in events[-1].output
+
+    mock_publisher.publish.assert_called_once()
+    mock_post.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://hassan-t.atlassian.net/rest/api/3/issue/SPORT-777/comment"
+
+
+def test_check_destructive_intent_routes_clean_ticket_to_ok():
+    from app.agent import check_destructive_intent
+
+    ctx = MagicMock(spec=Context)
+    ctx.state = {"ticket_text": "add a daily active users model for the sports domain"}
+
+    events = list(check_destructive_intent(ctx, {"passthrough": "payload"}))
+
+    assert len(events) == 1
+    assert events[0].actions.route == "ok"
+    assert events[0].output == {"passthrough": "payload"}
