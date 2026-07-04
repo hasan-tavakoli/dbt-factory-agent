@@ -19,6 +19,66 @@ app = FastAPI(title="Jira Webhook Handler")
 publisher = pubsub_v1.PublisherClient()
 topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
 
+def _adf_node_to_text(node: Any) -> str:
+    """Recursively renders a single ADF node (and its children) to plain text."""
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    if not isinstance(node, dict):
+        return str(node)
+
+    node_type = node.get("type")
+
+    if node_type == "hardBreak":
+        return "\n"
+
+    parts = []
+    text = node.get("text")
+    if text:
+        parts.append(text)
+
+    for child in node.get("content") or []:
+        parts.append(_adf_node_to_text(child))
+
+    rendered = "".join(parts)
+
+    # Block-level nodes each end their own line, so sibling paragraphs/list
+    # items don't get smashed together with whatever follows them.
+    if node_type in ("paragraph", "heading", "listItem", "blockquote", "codeBlock", "rule"):
+        rendered += "\n"
+
+    return rendered
+
+
+def adf_to_plain_text(description: Any) -> str:
+    """
+    Converts a Jira description field to plain text.
+
+    Handles the shapes Jira actually sends:
+    - None -> ""
+    - str -> returned as-is (API v2 / already-plain text)
+    - dict (ADF document) -> recursively walked, concatenating every
+      {"type": "text", "text": ...} node regardless of which marks
+      (bold/italic/etc.) split it into separate runs, and turning
+      paragraph/heading/hardBreak boundaries into newlines.
+
+    Anything else falls back to str(description) rather than raising, since
+    this only feeds a best-effort ticket-text string for the LLM.
+    """
+    if description is None:
+        return ""
+    if isinstance(description, str):
+        return description
+    if isinstance(description, dict):
+        try:
+            return _adf_node_to_text(description).strip()
+        except Exception as e:
+            logger.warning(f"Failed to parse ADF description, falling back to str(): {e}")
+            return str(description)
+    return str(description)
+
+
 @app.post("/jira-webhook")
 async def handle_jira_webhook(request: Request):
     """Receives Jira issue transition/created webhook and publishes to Pub/Sub."""
@@ -50,10 +110,15 @@ async def handle_jira_webhook(request: Request):
 
     # 2. Extract issue key, summary, description
     summary = fields.get("summary", "") or ""
-    description = fields.get("description", "") or ""
+    description = fields.get("description")
 
-    # 3. Format message text (summary + newline + description)
-    ticket_text = f"{summary}\n{description}"
+    # 3. Format message text (summary + newline + description).
+    # Jira Cloud (API v3) sends `description` as an ADF document, not a plain
+    # string, as soon as it has any rich formatting — flatten it first so
+    # labeled fields like "Domain: sprot" survive regardless of how they were
+    # styled in the Jira editor.
+    plain_description = adf_to_plain_text(description)
+    ticket_text = f"{summary}\n{plain_description}"
 
     # 4. Formulate the exact streamQuery payload structure
     orchestrator_payload = {
