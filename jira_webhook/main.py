@@ -253,15 +253,6 @@ async def handle_jira_webhook(request: Request):
         logger.error(f"Failed to parse JSON body: {e}")
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid JSON payload"})
 
-    # TEMP DEBUG (remove once verified on a real transition): confirm the
-    # Automation rule's "Send web request" body actually forwards Jira's
-    # native changelog. Logs only the top-level shape, never full
-    # contents/secrets.
-    logger.info(
-        f"[TEMP DEBUG] Incoming payload top-level keys: {sorted(payload.keys())}, "
-        f"has_changelog={'changelog' in payload}"
-    )
-
     # 1. Decide whether this event is a genuine transition into "In
     # Progress" (see should_process_event/evaluate_webhook_event above).
     issue = payload.get("issue", {})
@@ -299,7 +290,7 @@ async def handle_jira_webhook(request: Request):
     try:
         data_str = json.dumps(orchestrator_payload)
         data_bytes = data_str.encode("utf-8")
-        
+
         logger.info(f"Publishing payload for {issue_key} to topic {topic_path}...")
         future = publisher.publish(topic_path, data=data_bytes)
         message_id = future.result()
