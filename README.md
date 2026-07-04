@@ -32,7 +32,14 @@ This isn't a single prompt-to-code call — it's a **multi-agent system**, becau
 - **Human-in-the-loop, not human-in-the-way** — the workflow pauses mid-execution (via ADK's resumable `RequestInput`) to ask a targeted question — "did you mean `sports`?", "what cron schedule?" — and resumes exactly where it left off once a human (or a dashboard click) answers.
 - **PR creation, not auto-merge** — every generated change lands as a pull request with an LLM-written "Vibe Diff" summary (what changed, risk level, intent alignment), so a human still reviews and merges.
 
-## 3. Architecture overview
+## 3. Why this matters
+
+- **Hours and cost, both cut.** Done by hand, each of these changes is slow, repetitive engineering work — reading the ticket, writing the boilerplate SQL or config, wiring the schedule, opening the PR — easily tens of minutes to hours per change once context-switching and the manual image-tag step are counted. Even with an AI *assistant* in the loop, doing it conversationally burns a lot of tokens per change. This framework collapses both: the mechanical work happens automatically, and — because it's **deterministic-first** — most steps run as plain code with no LLM call at all, so token spend stays low even as volume grows.
+- **Deterministic by default, LLM only where it must be.** The LLM is used only for what genuinely needs reasoning (understanding prose, drafting SQL, summarizing a PR). Everything else — validation, config assembly, safety checks, git flow — is ordinary, testable code. This is a deliberate advantage, not an implementation detail: deterministic steps are cheaper (no per-run LLM cost), safer (they can't be prompt-injected), and reliable (they behave the same every time).
+- **Reliable by construction.** Every inter-service hop is a durable Pub/Sub queue with a dead-letter topic, so nothing is silently lost; each agent redeploys independently; and the deterministic checks, unit/integration tests, and human-merge gate mean a bad change is caught, not shipped.
+- **Not tied to one domain.** `sports` is only the sample domain shown here. The framework is domain-agnostic: adding a new domain (e.g. `analytics`, `wallet`, `bi`) is a matter of registering it, after which tickets for that domain flow through the same pipeline and get their own generated models and config — a new domain simply becomes a new sub-pipeline, with no change to the core agents.
+
+## 4. Architecture overview
 
 ![Agent system architecture](docs/02-agent-system.svg)
 
@@ -99,7 +106,7 @@ This system is deliberately designed to push the other way. Every change the age
 
 The goal is not to replace the reviewer but to **make the reviewer faster and better-informed**: the Vibe Diff explains the change, surfaces its risk up front, and shows the engineer the shape of the change rather than just a raw diff. Because a human still merges every PR, the loop *transfers* knowledge and structure to the team instead of hollowing it out — the agent does the mechanical work, while the engineer keeps ownership, context, and the final decision.
 
-## 4. Key features / concepts demonstrated
+## 5. Key features / concepts demonstrated
 
 - **Multi-agent ADK system** — two separately deployable `Workflow` (graph) agents built on ADK 2.0, communicating over Pub/Sub rather than direct calls; each can be redeployed, scaled, or replaced independently.
 - **Deployability** — scaffolded and deployed with `agents-cli` to **Agent Runtime** (Vertex AI Reasoning Engine); the two supporting services (Jira webhook, Manager Dashboard) run as lightweight **Cloud Run** FastAPI apps; secrets come from **Secret Manager**, never from code.
@@ -114,7 +121,7 @@ The goal is not to replace the reviewer but to **make the reviewer faster and be
 - **Agents CLI** — the project was scaffolded, evaluated, and deployed with the Agents CLI end to end (`agents-cli deploy` to Agent Runtime).
 - **Transport decision (MCP evaluated)** — an Atlassian **MCP** server was evaluated as the Jira integration point, but a Pub/Sub-backed webhook was chosen instead: it needs no long-lived connection or session state, survives agent redeploys, and keeps the Jira-facing surface to a single small, independently deployable endpoint.
 
-## 5. Design decisions & honest limitations
+## 6. Design decisions & honest limitations
 
 A few choices were made deliberately, and are worth calling out rather than hiding:
 
@@ -122,7 +129,7 @@ A few choices were made deliberately, and are worth calling out rather than hidi
 - **No auto-merge, by design.** The agent's job ends at a reviewed PR. A human always merges. This keeps a person in control of what actually reaches the platform.
 - **Non-production only.** The production guard is a hard stop, not a warning. Extending safely to production would be a separate, deliberate piece of work.
 
-## 6. Repo map
+## 7. Repo map
 
 | Repo | Role |
 |---|---|
@@ -136,7 +143,7 @@ Two more diagrams document the internal decision flow of each agent:
 - Orchestrator flow: [`docs/03-orchestrator-flow.svg`](docs/03-orchestrator-flow.svg)
 - Config-agent flow: [`docs/04-config-agent-flow.svg`](docs/04-config-agent-flow.svg)
 
-## 7. Setup / reproduce
+## 8. Setup / reproduce
 
 ### Prerequisites
 
@@ -192,6 +199,6 @@ agents-cli deploy \
 
 `dv-config-agent` is deployed the same way, independently. The Jira webhook and Manager Dashboard ship as Cloud Run services (each has its own `Procfile`/`Dockerfile`). Pub/Sub topics and push subscriptions wire the pieces together; each topic has a dead-letter topic for reliability.
 
-## 8. Security note
+## 9. Security note
 
 No secrets, API keys, or tokens are committed to this repository. All credentials (`GEMINI_API_KEY`, `GITHUB_TOKEN`, `JIRA_API_TOKEN`, `JIRA_EMAIL`) are supplied at runtime via environment variables backed by **Secret Manager** in deployed environments, or a local, gitignored `.env` file during development. The two-layer SQL safety check, the production guard, the anti-fabrication rules, and the tempfile-isolated feature-branch-only git flow together ensure the agent cannot write destructive SQL, touch production, invent credentials, or push to a protected branch.
