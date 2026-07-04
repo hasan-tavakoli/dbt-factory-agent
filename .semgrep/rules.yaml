@@ -1,0 +1,83 @@
+rules:
+  - id: dbt-factory-agent-hardcoded-google-gemini-api-key-py
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Hardcoded Google/Gemini API key detected (AIzaSy... prefix). This
+      project's GEMINI_API_KEY must only ever be loaded from a local .env
+      file (gitignored) or Secret Manager at deploy time - never committed
+      to source. Remove this literal and read it from the environment
+      (e.g. os.getenv("GEMINI_API_KEY")) instead.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+    patterns:
+      - pattern-regex: 'AIzaSy[A-Za-z0-9_\-]{20,}'
+
+  - id: dbt-factory-agent-hardcoded-google-gemini-api-key-generic
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      Hardcoded Google/Gemini API key detected (AIzaSy... prefix) in a
+      non-Python file (e.g. an accidentally staged .env, a config, or a
+      notebook). Remove it - credentials must never leave the workstation.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+    patterns:
+      - pattern-regex: 'AIzaSy[A-Za-z0-9_\-]{20,}'
+
+  - id: dbt-factory-agent-hardcoded-github-token-classic-py
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Hardcoded GitHub personal access token detected (ghp_... prefix).
+      This project's GITHUB_TOKEN must only ever be loaded from a local
+      .env file (gitignored) or Secret Manager - never committed. Remove
+      this literal and read it from the environment instead.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+    patterns:
+      - pattern-regex: 'ghp_[A-Za-z0-9]{36,}'
+
+  - id: dbt-factory-agent-hardcoded-github-token-classic-generic
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      Hardcoded GitHub personal access token detected (ghp_... prefix) in
+      a non-Python file. Remove it - credentials must never leave the
+      workstation.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+    patterns:
+      - pattern-regex: 'ghp_[A-Za-z0-9]{36,}'
+
+  - id: dbt-factory-agent-hardcoded-github-token-fine-grained-py
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Hardcoded GitHub fine-grained personal access token detected
+      (github_pat_... prefix). This project's GITHUB_TOKEN must only ever
+      be loaded from a local .env file (gitignored) or Secret Manager -
+      never committed. Remove this literal and read it from the
+      environment instead.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+    patterns:
+      - pattern-regex: 'github_pat_[A-Za-z0-9_]{22,}'
+
+  - id: dbt-factory-agent-hardcoded-github-token-fine-grained-generic
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      Hardcoded GitHub fine-grained personal access token detected
+      (github_pat_... prefix) in a non-Python file. Remove it -
+      credentials must never leave the workstation.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+    patterns:
+      - pattern-regex: 'github_pat_[A-Za-z0-9_]{22,}'

@@ -1,0 +1,19 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: semgrep-secrets-scan
+        name: Semgrep secrets scan (blocks hardcoded API keys/tokens)
+        description: >-
+          Runs this project's custom secret-detection rules
+          (.semgrep/rules.yaml) and fails the commit on any match -
+          GEMINI_API_KEY / GITHUB_TOKEN / JIRA_API_TOKEN must only ever
+          come from a local .env (gitignored) or Secret Manager.
+        entry: uv run semgrep --error --config .semgrep/rules.yaml
+        language: system
+        exclude: '^(\.venv/|uv\.lock$)'
